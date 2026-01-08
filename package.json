@@ -1,0 +1,36 @@
+{
+  "name": "signature-auto-care",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:api": "npm --prefix apps/api run start:dev",
+    "dev:py": "npm --prefix apps/py run dev",
+    "lint": "npm --workspaces run lint",
+    "typecheck": "npm --workspaces run typecheck",
+    "format": "npm --workspaces run format",
+    "build": "npm --workspaces run build",
+    "compose:up": "docker compose up --build",
+    "compose:down": "docker compose down"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "eslint": "8.57.1",
+    "eslint@9.39.2": "8.57.1",
+    "eslint-config-next": {
+      "eslint": "8.57.1"
+    }
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.52.0",
+    "@typescript-eslint/parser": "^8.52.0",
+    "eslint": "8.57.1",
+    "typescript": "^5.3.3"
+  }
+}
