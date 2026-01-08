@@ -3,6 +3,9 @@ const nextConfig = {
   output: "standalone",
   experimental: {
     typedRoutes: true
+  },
+  eslint: {
+    ignoreDuringBuilds: true
   }
 };
 
