@@ -1,4 +1,0 @@
-kushhalder1999_db_user
-M3SxAHM7ip6pgF3g
-
-mongodb+srv://kushhalder1999_db_user:M3SxAHM7ip6pgF3g@cluster0.nxpxi1o.mongodb.net/
