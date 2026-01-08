@@ -9,6 +9,7 @@ coverage
 *.tsbuildinfo
 .env
 .env.*
+db.txt
 /.idea
 /.vscode
 __pycache__/
