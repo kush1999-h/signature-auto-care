@@ -1,5 +1,7 @@
 # Signature Auto Care MVP
 
+[![Deploy to EC2](https://github.com/kush1999-h/signature-auto-care/actions/workflows/deploy-ec2.yml/badge.svg)](https://github.com/kush1999-h/signature-auto-care/actions/workflows/deploy-ec2.yml)
+
 Monorepo for a single-location service & repair shop.
 
 - Next.js + Tailwind + React Query (apps/web)
@@ -119,6 +121,25 @@ PDF service (Render, Docker):
 Web (Vercel):
 - Root directory: `apps/web`
 - Set `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_PDF_URL` before deploy
+
+## Production deployment (EC2 + Docker + GitHub Actions)
+
+Prereqs on EC2:
+- Docker + Docker Compose installed
+- Repo path: `/home/ec2-user/signature-auto-care`
+- Environment files created in `apps/api/.env`, `apps/web/.env`, `apps/py/.env`
+- (Optional) Nginx reverse proxy for ports 80/443
+
+GitHub Actions:
+- Workflow file: `.github/workflows/deploy-ec2.yml`
+- Required secrets:
+  - `EC2_HOST`
+  - `EC2_USER`
+  - `EC2_SSH_KEY`
+  - `EC2_PORT` (optional, default 22)
+
+HTTPS note:
+- Let's Encrypt requires a domain name. If you do not have a domain yet, deploy HTTP first and add HTTPS later.
 
 ## Login
 
