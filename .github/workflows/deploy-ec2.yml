@@ -30,4 +30,4 @@ jobs:
             if [ ! -f apps/api/.env ]; then cp apps/api/.env.example apps/api/.env; fi
             if [ ! -f apps/web/.env ]; then cp apps/web/.env.example apps/web/.env; fi
             if [ ! -f apps/py/.env ]; then cp apps/py/.env.example apps/py/.env; fi
-            docker compose up -d --build
+            docker compose up -d
