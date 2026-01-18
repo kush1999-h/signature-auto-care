@@ -10,7 +10,8 @@ COPY apps/web/next.config.js ./apps/web/next.config.js
 COPY apps/web/tailwind.config.ts ./apps/web/tailwind.config.ts
 COPY apps/web/postcss.config.js ./apps/web/postcss.config.js
 
-RUN npm install --workspaces --include-workspace-root=false
+ENV npm_config_cache=/tmp/.npm-cache
+RUN rm -rf /root/.npm && npm install --workspaces --include-workspace-root=false
 
 COPY packages/shared/src ./packages/shared/src
 COPY apps/web ./apps/web

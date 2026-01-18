@@ -8,7 +8,8 @@ COPY packages/shared/tsconfig.json ./packages/shared/tsconfig.json
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/api/tsconfig.json ./apps/api/tsconfig.json
 
-RUN npm install --workspaces --include-workspace-root=false
+ENV npm_config_cache=/tmp/.npm-cache
+RUN rm -rf /root/.npm && npm install --workspaces --include-workspace-root=false
 
 COPY packages/shared/src ./packages/shared/src
 COPY apps/api/src ./apps/api/src
