@@ -22,9 +22,6 @@ export class Vehicle {
 
   @Prop()
   year?: number;
-
-  @Prop()
-  mileage?: number;
 }
 
 export const VehicleSchema = SchemaFactory.createForClass(Vehicle);

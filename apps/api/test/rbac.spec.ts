@@ -13,6 +13,8 @@ import {
   TimeLogSchema,
   Part,
   PartSchema,
+  Service,
+  ServiceSchema,
   InventoryTransaction,
   InventoryTransactionSchema,
   Customer,
@@ -45,6 +47,7 @@ describe("RBAC protections", () => {
     const workOrderModel = connection.model(WorkOrder.name, WorkOrderSchema);
     const timeLogModel = connection.model(TimeLog.name, TimeLogSchema);
     const partModel = connection.model(Part.name, PartSchema);
+    const serviceModel = connection.model(Service.name, ServiceSchema);
     const trxModel = connection.model(
       InventoryTransaction.name,
       InventoryTransactionSchema
@@ -62,6 +65,7 @@ describe("RBAC protections", () => {
       workOrderModel,
       timeLogModel,
       partModel,
+      serviceModel,
       trxModel,
       customerModel,
       vehicleModel,
@@ -116,7 +120,7 @@ describe("RBAC protections", () => {
       assignedEmployees: [
         {
           employeeId: new mongoose.Types.ObjectId(userA),
-          roleType: "TECHNICIAN",
+          roleType: "SERVICE_ADVISOR",
         },
       ],
     });
@@ -127,7 +131,7 @@ describe("RBAC protections", () => {
       assignedEmployees: [
         {
           employeeId: new mongoose.Types.ObjectId(userB),
-          roleType: "TECHNICIAN",
+          roleType: "SERVICE_ADVISOR",
         },
       ],
     });
@@ -150,8 +154,8 @@ describe("RBAC protections", () => {
     expect(result[0].assignedEmployees[0].employeeId.toString()).toBe(userA);
   });
 
-  test("tech with scheduled-pool permission sees unassigned scheduled plus own assigned", async () => {
-    const techId = new mongoose.Types.ObjectId().toString();
+  test("read-assigned user does not see unassigned scheduled work orders", async () => {
+    const userId = new mongoose.Types.ObjectId().toString();
     const woModel = connection.model(WorkOrder.name);
     await woModel.create({
       customerId: new mongoose.Types.ObjectId(),
@@ -159,8 +163,8 @@ describe("RBAC protections", () => {
       status: "Scheduled",
       assignedEmployees: [
         {
-          employeeId: new mongoose.Types.ObjectId(techId),
-          roleType: "TECHNICIAN",
+          employeeId: new mongoose.Types.ObjectId(userId),
+          roleType: "SERVICE_ADVISOR",
         },
       ],
     });
@@ -172,36 +176,33 @@ describe("RBAC protections", () => {
     });
     const result = await workOrdersService.list(
       {
-        userId: techId,
-        role: "TECHNICIAN",
-        permissions: [
-          Permissions.WORKORDERS_READ_ASSIGNED,
-          Permissions.WORKORDERS_READ_SCHEDULED_POOL,
-        ],
+        userId,
+        role: "SERVICE_ADVISOR",
+        permissions: [Permissions.WORKORDERS_READ_ASSIGNED],
       },
       {}
     );
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(1);
   });
 
-  test("technician cannot set work order status back to Scheduled", async () => {
-    const techId = new mongoose.Types.ObjectId().toString();
+  test("status updates are permission-driven (service call allowed when invoked)", async () => {
+    const userId = new mongoose.Types.ObjectId().toString();
     const wo = await connection.model(WorkOrder.name).create({
       customerId: new mongoose.Types.ObjectId(),
       vehicleId: new mongoose.Types.ObjectId(),
       status: "In Progress",
       assignedEmployees: [
         {
-          employeeId: new mongoose.Types.ObjectId(techId),
-          roleType: "TECHNICIAN",
+          employeeId: new mongoose.Types.ObjectId(userId),
+          roleType: "SERVICE_ADVISOR",
         },
       ],
     });
     await expect(
       workOrdersService.updateStatus(wo._id.toString(), "Scheduled", {
-        userId: techId,
-        role: "TECHNICIAN",
+        userId,
+        role: "SERVICE_ADVISOR",
       })
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    ).resolves.toBeDefined();
   });
 });

@@ -10,8 +10,6 @@ const roleOptions = [
   { value: "OWNER_ADMIN", label: "Owner / Admin" },
   { value: "OPS_MANAGER", label: "Operations Manager" },
   { value: "SERVICE_ADVISOR", label: "Service Advisor" },
-  { value: "TECHNICIAN", label: "Technician" },
-  { value: "PAINTER", label: "Painter" },
   { value: "INVENTORY_MANAGER", label: "Inventory Manager" },
   { value: "ACCOUNTANT", label: "Accountant" }
 ];
@@ -37,6 +35,7 @@ const allPermissions = [
   "WORKORDERS_READ_ASSIGNED",
   "WORKORDERS_CREATE",
   "WORKORDERS_UPDATE_STATUS",
+  "WORKORDERS_BILLING_EDIT",
   "WORKORDERS_ASSIGN_EMPLOYEE",
   "WORKORDERS_ADD_NOTES",
   "WORKORDERS_ADD_ATTACHMENTS",
@@ -49,6 +48,10 @@ const allPermissions = [
   "PARTS_READ",
   "PARTS_CREATE",
   "PARTS_UPDATE",
+  "SERVICES_READ",
+  "SERVICES_CREATE",
+  "SERVICES_UPDATE",
+  "SERVICES_PRICE_UPDATE",
   "INVENTORY_RECEIVE",
   "INVENTORY_ADJUST",
   "INVENTORY_ISSUE_TO_WORKORDER",
@@ -82,7 +85,7 @@ export default function UsersPage() {
   const qc = useQueryClient();
   const canRead = session?.user?.permissions?.includes("USERS_READ");
   const canCreate = session?.user?.permissions?.includes("USERS_CREATE");
-  const isOwner = session?.user?.role === "OWNER_ADMIN";
+  const canUpdate = session?.user?.permissions?.includes("USERS_UPDATE");
 
   const users = useQuery({
     queryKey: ["users"],
@@ -194,7 +197,7 @@ export default function UsersPage() {
                       <p className="text-xs text-muted-foreground">{(u.permissions || []).length} perms</p>
                       <p className={`text-xs ${u.isActive ? "text-accent" : "text-primary"}`}>{u.isActive ? "Active" : "Disabled"}</p>
                     </div>
-                    {isOwner && (
+                    {canUpdate && (
                       <button
                         onClick={() => startEditing(u)}
                         className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
@@ -253,10 +256,10 @@ export default function UsersPage() {
               {create.isPending ? "Saving..." : "Create User"}
             </button>
 
-            {isOwner && (
+            {canUpdate && (
               <div className="border-t border-border pt-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <p className="font-semibold text-foreground text-sm">Edit User (admin only)</p>
+                  <p className="font-semibold text-foreground text-sm">Edit User</p>
                   {editingUserId && (
                     <button
                       className="text-[11px] text-muted-foreground hover:text-foreground"

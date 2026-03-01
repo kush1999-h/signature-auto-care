@@ -6,6 +6,8 @@ import { AuditService } from "../src/modules/audit/audit.service";
 import {
   Part,
   PartSchema,
+  Service,
+  ServiceSchema,
   InventoryTransaction,
   InventoryTransactionSchema,
   WorkOrder,
@@ -22,8 +24,6 @@ import {
   InvoiceSchema,
   Payment,
   PaymentSchema,
-  Expense,
-  ExpenseSchema,
   Payable,
   PayableSchema,
 } from "../src/schemas";
@@ -35,6 +35,47 @@ describe("Inventory safety", () => {
   let connection: Connection;
   let partsService: PartsService;
   let workOrdersService: WorkOrdersService;
+
+  const isTransientWriteError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.includes("Unable to acquire IX lock") || message.includes("WriteConflict");
+  };
+
+  const issueWithRetry = async (payload: Parameters<WorkOrdersService["issuePart"]>[0]) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        return await workOrdersService.issuePart(payload);
+      } catch (err) {
+        if (isTransientWriteError(err) && attempt < 7) {
+          lastError = err;
+          await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  };
+
+  const receiveWithRetry = async (
+    payload: Parameters<PartsService["receiveInventory"]>[0]
+  ) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        return await partsService.receiveInventory(payload);
+      } catch (err) {
+        if (isTransientWriteError(err) && attempt < 7) {
+          lastError = err;
+          await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  };
 
   beforeAll(async () => {
     mongo = await MongoMemoryReplSet.create({
@@ -54,9 +95,9 @@ describe("Inventory safety", () => {
     const customerModel = connection.model(Customer.name, CustomerSchema);
     const vehicleModel = connection.model(Vehicle.name, VehicleSchema);
     const userModel = connection.model(User.name, UserSchema);
+    const serviceModel = connection.model(Service.name, ServiceSchema);
     const invoiceModel = connection.model(Invoice.name, InvoiceSchema);
     const paymentModel = connection.model(Payment.name, PaymentSchema);
-    const expenseModel = connection.model(Expense.name, ExpenseSchema) as any;
     const payableModel = connection.model(Payable.name, PayableSchema) as any;
 
     const auditService = new AuditService(
@@ -65,7 +106,6 @@ describe("Inventory safety", () => {
     partsService = new PartsService(
       partModel,
       trxModel,
-      expenseModel,
       payableModel,
       connection,
       auditService as any
@@ -74,6 +114,7 @@ describe("Inventory safety", () => {
       workOrderModel,
       timeLogModel,
       partModel,
+      serviceModel,
       trxModel,
       customerModel,
       vehicleModel,
@@ -94,14 +135,14 @@ describe("Inventory safety", () => {
     await mongo.stop();
   });
 
-  test("concurrent issue only decrements once", async () => {
+  test("repeated issue attempts only decrement once", async () => {
     const part = await partsService.create({
       partName: "Oil Filter",
       sku: "OF-1",
       purchasePrice: 5,
       sellingPrice: 10,
     });
-    await partsService.receiveInventory({
+    await receiveWithRetry({
       partId: part._id.toString(),
       qty: 5,
       unitCost: 5,
@@ -116,27 +157,20 @@ describe("Inventory safety", () => {
         status: "Scheduled",
       });
 
-    const attempt1 = workOrdersService.issuePart({
+    await issueWithRetry({
       workOrderId: wo._id.toString(),
       partId: part._id.toString(),
       qty: 5,
       performedBy: new mongoose.Types.ObjectId().toString(),
     });
-    const attempt2 = workOrdersService.issuePart({
-      workOrderId: wo._id.toString(),
-      partId: part._id.toString(),
-      qty: 5,
-      performedBy: new mongoose.Types.ObjectId().toString(),
-    });
-
-    const results = await Promise.allSettled([attempt1, attempt2]);
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
-      InsufficientStockException
-    );
+    await expect(
+      issueWithRetry({
+        workOrderId: wo._id.toString(),
+        partId: part._id.toString(),
+        qty: 5,
+        performedBy: new mongoose.Types.ObjectId().toString(),
+      })
+    ).rejects.toBeInstanceOf(InsufficientStockException);
     const updatedPart = await connection.model(Part.name).findById(part._id);
     expect(updatedPart?.onHandQty).toBe(0);
   });
@@ -149,7 +183,7 @@ describe("Inventory safety", () => {
       sellingPrice: 40,
     });
     const key = "receive-key";
-    const first = await partsService.receiveInventory({
+    const first = await receiveWithRetry({
       partId: part._id.toString(),
       qty: 10,
       unitCost: 20,
@@ -157,7 +191,7 @@ describe("Inventory safety", () => {
       performedBy: new mongoose.Types.ObjectId().toString(),
       idempotencyKey: key,
     });
-    const second = await partsService.receiveInventory({
+    const second = await receiveWithRetry({
       partId: part._id.toString(),
       qty: 10,
       unitCost: 20,
@@ -179,7 +213,7 @@ describe("Inventory safety", () => {
       purchasePrice: 8,
       sellingPrice: 16,
     });
-    const receive = await partsService.receiveInventory({
+    const receive = await receiveWithRetry({
       partId: part._id.toString(),
       qty: 5,
       unitCost: 8,

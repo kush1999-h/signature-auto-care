@@ -10,6 +10,7 @@ import {
   InventoryTransaction,
   Payment,
   Part,
+  Service,
   TimeLog,
   Vehicle,
   WorkOrder,
@@ -30,6 +31,7 @@ export class AdminService {
     @InjectModel(Expense.name) private expenseModel: Model<Expense>,
     @InjectModel(Payable.name) private payableModel: Model<Payable>,
     @InjectModel(Part.name) private partModel: Model<Part>,
+    @InjectModel(Service.name) private serviceModel: Model<Service>,
     @InjectModel(AuditLog.name) private auditLogModel: Model<AuditLog>
   ) {}
 
@@ -38,7 +40,7 @@ export class AdminService {
       throw new ForbiddenException("Only OWNER_ADMIN can purge data");
     }
 
-    const [customers, vehicles, workOrders, timeLogs, trx, invoices, payments, expenses, payables, parts, audits] =
+    const [customers, vehicles, workOrders, timeLogs, trx, invoices, payments, expenses, payables, parts, services, audits] =
       await Promise.all([
         this.customerModel.deleteMany({}),
         this.vehicleModel.deleteMany({}),
@@ -50,6 +52,7 @@ export class AdminService {
         this.expenseModel.deleteMany({}),
         this.payableModel.deleteMany({}),
         this.partModel.deleteMany({}),
+        this.serviceModel.deleteMany({}),
         this.auditLogModel.deleteMany({}),
       ]);
 
@@ -66,6 +69,7 @@ export class AdminService {
         expenses: expenses.deletedCount || 0,
         payables: payables.deletedCount || 0,
         parts: parts.deletedCount || 0,
+        services: services.deletedCount || 0,
         auditLogs: audits.deletedCount || 0,
       },
     };

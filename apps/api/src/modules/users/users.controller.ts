@@ -95,7 +95,10 @@ export class UsersController {
   @Patch(":id")
   @PermissionsRequired(Permissions.USERS_UPDATE)
   async update(@Param("id") id: string, @Body() body: UpdateUserDto, @CurrentUser() user: AuthUser) {
-    return this.usersService.update(id, body, { role: user.role });
+    return this.usersService.update(id, body, {
+      role: user.role,
+      permissions: user.permissions
+    });
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

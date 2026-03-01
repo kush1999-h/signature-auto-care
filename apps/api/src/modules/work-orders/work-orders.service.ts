@@ -20,6 +20,7 @@ import {
   WorkOrder,
   TimeLog,
   Part,
+  Service,
   InventoryTransaction,
   Customer,
   Vehicle,
@@ -32,12 +33,20 @@ import { InsufficientStockException } from "../../common/exceptions/insufficient
 import { AuthUser } from "../../common/decorators/current-user.decorator";
 
 type InvoiceLineItem = {
-  type: "LABOR" | "PART" | "OTHER";
+  type: "LABOR" | "PART" | "SERVICE" | "OTHER";
   description: string;
   quantity: number;
   unitPrice: Types.Decimal128;
   total: Types.Decimal128;
   costAtTime?: Types.Decimal128;
+};
+
+type BillingServiceLineInput = {
+  serviceId: string;
+  qty?: number;
+  unitPriceAtTime?: number;
+  unitCostAtTime?: number;
+  nameAtTime?: string;
 };
 
 const normalizeId = (value: unknown) => {
@@ -60,6 +69,7 @@ export class WorkOrdersService {
     private workOrderModel: Model<WorkOrder>,
     @InjectModel(TimeLog.name) private timeLogModel: Model<TimeLog>,
     @InjectModel(Part.name) private partModel: Model<Part>,
+    @InjectModel(Service.name) private serviceModel: Model<Service>,
     @InjectModel(InventoryTransaction.name)
     private trxModel: Model<InventoryTransaction>,
     @InjectModel(Customer.name) private customerModel: Model<Customer>,
@@ -88,13 +98,18 @@ export class WorkOrdersService {
       const priceEach = this.decimalToNumber(part.sellingPriceAtTime || 0);
       return sum + qty * priceEach;
     }, 0);
+    const servicesTotal = (wo.servicesUsed || []).reduce((sum, service) => {
+      const qty = Number(service.qty) || 0;
+      const priceEach = this.decimalToNumber(service.unitPriceAtTime || 0);
+      return sum + qty * priceEach;
+    }, 0);
     const otherTotal = (wo.otherCharges || []).reduce((sum, charge) => {
       return sum + this.decimalToNumber(charge?.amount || 0);
     }, 0);
-    const subtotal = labor + partsTotal + otherTotal;
+    const subtotal = labor + partsTotal + servicesTotal + otherTotal;
     const tax = 0;
     const total = subtotal + tax;
-    return { labor, partsTotal, otherTotal, subtotal, tax, total };
+    return { labor, partsTotal, servicesTotal, otherTotal, subtotal, tax, total };
   }
 
   private buildInvoicePayload(wo: WorkOrder) {
@@ -137,6 +152,25 @@ export class WorkOrdersService {
           quantity: 1,
           unitPrice: this.decimalFromNumber(amount),
           total: this.decimalFromNumber(amount),
+          costAtTime: this.decimalFromNumber(
+            this.decimalToNumber((charge as { costAtTime?: Types.Decimal128 }).costAtTime || 0)
+          ),
+        });
+      }
+    }
+
+    for (const service of wo.servicesUsed || []) {
+      const qty = Number(service.qty) || 0;
+      const priceEach = this.decimalToNumber(service.unitPriceAtTime || 0);
+      const totalPrice = priceEach * qty;
+      if (qty > 0 && totalPrice >= 0) {
+        lineItems.push({
+          type: "SERVICE",
+          description: service.nameAtTime || `Service (${service.serviceId})`,
+          quantity: qty,
+          unitPrice: this.decimalFromNumber(priceEach),
+          total: this.decimalFromNumber(totalPrice),
+          costAtTime: this.decimalFromNumber(this.decimalToNumber(service.unitCostAtTime || 0)),
         });
       }
     }
@@ -153,7 +187,6 @@ export class WorkOrdersService {
   }
 
   async list(user: AuthUser, query: { status?: string } = {}) {
-    const isTechOrPainter = ["TECHNICIAN", "PAINTER"].includes(user.role || "");
     const userId = resolveUserId(user);
     const userObjectId = toObjectId(userId);
 
@@ -170,36 +203,14 @@ export class WorkOrdersService {
         throw new ForbiddenException("Invalid user id");
       }
 
-      // If no status filter, default to excluding COMPLETED
+      // If no status filter, default to excluding closed/canceled
       if (!query.status) {
         const assigned = this.workOrderModel
           .find({
             "assignedEmployees.employeeId": userObjectId,
-            status: { $ne: WorkOrderStatus.COMPLETED },
+            status: { $nin: [WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELED] },
           })
           .sort({ createdAt: -1 });
-
-        // If tech/painter with scheduled pool access, also show unassigned scheduled
-        if (
-          isTechOrPainter &&
-          user.permissions.includes(Permissions.WORKORDERS_READ_SCHEDULED_POOL)
-        ) {
-          return this.workOrderModel
-            .find({
-              $or: [
-                {
-                  "assignedEmployees.employeeId": userObjectId,
-                  status: { $ne: WorkOrderStatus.COMPLETED },
-                },
-                {
-                  status: WorkOrderStatus.SCHEDULED,
-                  assignedEmployees: { $size: 0 },
-                },
-              ],
-            })
-            .sort({ createdAt: -1 })
-            .exec();
-        }
 
         return assigned.exec();
       }
@@ -211,29 +222,6 @@ export class WorkOrdersService {
           status: query.status,
         })
         .sort({ createdAt: -1 });
-
-      // For Scheduled status, also include unassigned scheduled
-      if (
-        query.status === WorkOrderStatus.SCHEDULED &&
-        isTechOrPainter &&
-        user.permissions.includes(Permissions.WORKORDERS_READ_SCHEDULED_POOL)
-      ) {
-        return this.workOrderModel
-          .find({
-            $or: [
-              {
-                "assignedEmployees.employeeId": userObjectId,
-                status: WorkOrderStatus.SCHEDULED,
-              },
-              {
-                status: WorkOrderStatus.SCHEDULED,
-                assignedEmployees: { $size: 0 },
-              },
-            ],
-          })
-          .sort({ createdAt: -1 })
-          .exec();
-      }
 
       return assigned.exec();
     }
@@ -262,15 +250,7 @@ export class WorkOrdersService {
     }
 
     if (!canAll && canAssigned) {
-      const isTechOrPainter = ["TECHNICIAN", "PAINTER"].includes(
-        user.role || ""
-      );
-      const canSeeUnassignedScheduled =
-        isTechOrPainter &&
-        wo.status === WorkOrderStatus.SCHEDULED &&
-        assignedIds.length === 0 &&
-        user.permissions?.includes(Permissions.WORKORDERS_READ_SCHEDULED_POOL);
-      if (!assignedIds.includes(userId) && !canSeeUnassignedScheduled) {
+      if (!assignedIds.includes(userId)) {
         throw new ForbiddenException("No access to this work order");
       }
     }
@@ -353,7 +333,8 @@ export class WorkOrdersService {
         "WORK_ORDER_CREATED",
         "WORK_ORDER_BILLING_SUBMIT",
         "WORK_ORDER_BILLING_UPDATE",
-        "WORK_ORDER_ASSIGN"
+        "WORK_ORDER_ASSIGN",
+        "WORK_ORDER_CANCELLED"
       ],
       limit: 100
     });
@@ -421,16 +402,39 @@ export class WorkOrdersService {
       const detail = partsMap[p.partId?.toString() || ""] || {};
       return {
         ...p,
+        qty: Number(p.qty || 0),
+        sellingPriceAtTime: this.decimalToNumber((p as { sellingPriceAtTime?: Types.Decimal128 }).sellingPriceAtTime || 0),
+        costAtTime: this.decimalToNumber((p as { costAtTime?: Types.Decimal128 }).costAtTime || 0),
         partName: detail.partName,
         sku: detail.sku,
         barcode: detail.barcode,
       };
     });
 
+    const normalizedServices = (wo.servicesUsed || []).map((s) => ({
+      ...s,
+      qty: Number(s.qty || 0),
+      unitPriceAtTime: this.decimalToNumber((s as { unitPriceAtTime?: Types.Decimal128 }).unitPriceAtTime || 0),
+      unitCostAtTime: this.decimalToNumber((s as { unitCostAtTime?: Types.Decimal128 }).unitCostAtTime || 0),
+    }));
+
+    const normalizedOtherCharges = (wo.otherCharges || []).map((c) => ({
+      ...c,
+      amount: this.decimalToNumber((c as { amount?: Types.Decimal128 }).amount || 0),
+      costAtTime: this.decimalToNumber((c as { costAtTime?: Types.Decimal128 }).costAtTime || 0),
+    }));
+
+    const normalizedWorkOrder = {
+      ...wo,
+      billableLaborAmount: this.decimalToNumber((wo as { billableLaborAmount?: Types.Decimal128 }).billableLaborAmount || 0),
+      servicesUsed: normalizedServices,
+      otherCharges: normalizedOtherCharges,
+    };
+
     const isAssigned = userId ? assignedIds.includes(userId) : false;
 
     return {
-      workOrder: wo,
+      workOrder: normalizedWorkOrder,
       customer,
       vehicle,
       assignedEmployees: users,
@@ -468,7 +472,7 @@ export class WorkOrdersService {
     return wo;
   }
 
-  async updateStatus(id: string, status: string, user: AuthUser) {
+  async updateStatus(id: string, status: string, user: AuthUser, note?: string) {
     const allowedStatuses = new Set<WorkOrderStatusType>(Object.values(WorkOrderStatus));
     if (!allowedStatuses.has(status as WorkOrderStatusType)) {
       throw new BadRequestException("Invalid status");
@@ -476,15 +480,86 @@ export class WorkOrdersService {
 
     const wo = await this.workOrderModel.findById(id);
     if (!wo) throw new NotFoundException("Work order not found");
+    const previousStatus = wo.status;
 
-    const isTechOrPainter = ["TECHNICIAN", "PAINTER"].includes(user.role || "");
-    if (isTechOrPainter) {
-      throw new ForbiddenException("Technicians and painters cannot update status manually");
-    }
+    if (status === WorkOrderStatus.CANCELED) {
+      if (wo.status === WorkOrderStatus.CLOSED) {
+        throw new BadRequestException("Closed work orders cannot be canceled");
+      }
+      if (wo.status === WorkOrderStatus.CANCELED) {
+        return wo;
+      }
+      const message = (note || "").trim();
+      if (!message) {
+        throw new BadRequestException("Cancellation note is required");
+      }
+      const performerId = resolveUserId(user);
+      const performerObjectId = toObjectId(performerId);
+      if (!performerObjectId) {
+        throw new ForbiddenException("Invalid user id");
+      }
+      const session = await this.connection.startSession();
+      session.startTransaction();
+      try {
+        const refreshed = await this.workOrderModel.findById(id).session(session);
+        if (!refreshed) throw new NotFoundException("Work order not found");
+        const partsToReturn = refreshed.partsUsed || [];
+        for (const part of partsToReturn) {
+          const qty = Number(part.qty) || 0;
+          if (qty <= 0 || !part.partId) continue;
+          const updatedPart = await this.partModel.findByIdAndUpdate(
+            part.partId,
+            { $inc: { onHandQty: qty } },
+            { new: true, session }
+          );
+          if (!updatedPart) {
+            throw new NotFoundException("Part not found");
+          }
+          const unitCost = this.decimalToNumber(part.costAtTime) || this.decimalToNumber(updatedPart?.avgCost);
+          await this.trxModel.create(
+            [
+              {
+                type: InventoryTransactionType.RETURN,
+                partId: part.partId,
+                qtyChange: qty,
+                unitCost: this.decimalFromNumber(unitCost),
+                referenceType: InventoryReferenceType.WORK_ORDER,
+                referenceId: refreshed._id.toString(),
+                performedByEmployeeId: performerObjectId || undefined,
+                notes: `Canceled work order: ${message}`
+              }
+            ],
+            { session }
+          );
+        }
 
-    if (status === WorkOrderStatus.CLOSED && wo.status !== WorkOrderStatus.COMPLETED) {
-      // Auto-progress to COMPLETED if attempting to close directly
-      wo.status = WorkOrderStatus.COMPLETED;
+        refreshed.status = WorkOrderStatus.CANCELED;
+        refreshed.notes = refreshed.notes || [];
+        refreshed.notes.push({
+          authorId: performerObjectId,
+          message: `Canceled: ${message}`,
+          createdAt: new Date()
+        });
+        await refreshed.save({ session });
+
+        if (performerObjectId) {
+          await this.audit.record({
+            actionType: "WORK_ORDER_CANCELLED",
+            entityType: "WorkOrder",
+            entityId: refreshed._id.toString(),
+            performedByEmployeeId: performerObjectId,
+            after: { status: refreshed.status, note: message }
+          });
+        }
+
+        await session.commitTransaction();
+        return refreshed.toJSON();
+      } catch (err) {
+        await session.abortTransaction();
+        throw err;
+      } finally {
+        session.endSession();
+      }
     }
 
     // If status is being changed to Closed, close the invoice and record payment
@@ -555,6 +630,11 @@ export class WorkOrdersService {
     }
 
     wo.status = status;
+    if (status === WorkOrderStatus.CLOSED && previousStatus !== WorkOrderStatus.CLOSED) {
+      wo.deliveredAt = new Date();
+    } else if (status !== WorkOrderStatus.CLOSED && previousStatus === WorkOrderStatus.CLOSED) {
+      wo.deliveredAt = null;
+    }
     await wo.save();
     const performerId = resolveUserId(user);
     const performerObjectId = toObjectId(performerId);
@@ -564,7 +644,7 @@ export class WorkOrdersService {
         entityType: "WorkOrder",
         entityId: wo._id.toString(),
         performedByEmployeeId: performerObjectId,
-        after: { status },
+        after: { status, deliveredAt: wo.deliveredAt },
       });
     }
     return wo;
@@ -574,16 +654,17 @@ export class WorkOrdersService {
     id: string,
     payload: {
       billableLaborAmount?: number;
-      otherCharges?: { name: string; amount: number }[];
+      otherCharges?: { name: string; amount: number; costAtTime?: number }[];
+      servicesUsed?: BillingServiceLineInput[];
       paymentMethod?: string;
     },
     user: AuthUser
   ) {
     const wo = await this.workOrderModel.findById(id);
     if (!wo) throw new NotFoundException("Work order not found");
-    const isTechOrPainter = ["TECHNICIAN", "PAINTER"].includes(user.role || "");
-    if (isTechOrPainter) {
-      throw new ForbiddenException("Not allowed to edit billing");
+    const canEditBilling = user.permissions?.includes(Permissions.WORKORDERS_BILLING_EDIT);
+    if (!canEditBilling) {
+      throw new ForbiddenException("No permission to edit billing");
     }
 
     if (payload.billableLaborAmount !== undefined) {
@@ -598,20 +679,79 @@ export class WorkOrdersService {
 
     if (payload.otherCharges) {
       const normalized = payload.otherCharges
-        .filter((c) => c && (c.name?.trim() || c.amount !== undefined))
+        .filter(
+          (c) =>
+            c &&
+            (c.name?.trim() || c.amount !== undefined || c.costAtTime !== undefined)
+        )
         .map((charge) => {
           const amount = Number(charge.amount);
+          const costAtTime = Number(charge.costAtTime ?? 0);
           if (!Number.isFinite(amount) || amount < 0) {
             throw new BadRequestException(
               "Charge amount must be a non-negative number"
             );
           }
+          if (!Number.isFinite(costAtTime) || costAtTime < 0) {
+            throw new BadRequestException(
+              "Charge cost must be a non-negative number"
+            );
+          }
           return {
             name: charge.name?.trim() || "Charge",
             amount: this.decimalFromNumber(amount),
+            costAtTime: this.decimalFromNumber(costAtTime),
           };
         });
       wo.otherCharges = normalized;
+    }
+
+    if (payload.servicesUsed) {
+      const lines = payload.servicesUsed.filter((line) => line && line.serviceId);
+      const serviceIds = lines.map((line) => line.serviceId).filter(Boolean);
+      const serviceDocs = serviceIds.length
+        ? await this.serviceModel.find({ _id: { $in: serviceIds } }).lean()
+        : [];
+      const serviceMap = new Map(serviceDocs.map((doc) => [doc._id.toString(), doc]));
+      const normalizedServices = lines.map((line) => {
+        const serviceId = String(line.serviceId);
+        const serviceDoc = serviceMap.get(serviceId);
+        if (!serviceDoc) {
+          throw new BadRequestException(`Service not found: ${serviceId}`);
+        }
+        const qty = Number(line.qty ?? 1);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new BadRequestException("Service qty must be greater than zero");
+        }
+        const unitPrice = line.unitPriceAtTime !== undefined
+          ? Number(line.unitPriceAtTime)
+          : this.decimalToNumber(serviceDoc.defaultPrice);
+        const unitCost = line.unitCostAtTime !== undefined
+          ? Number(line.unitCostAtTime)
+          : this.decimalToNumber(serviceDoc.defaultCost);
+        if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new BadRequestException("Service unit price must be a non-negative number");
+        }
+        if (!Number.isFinite(unitCost) || unitCost < 0) {
+          throw new BadRequestException("Service unit cost must be a non-negative number");
+        }
+        return {
+          serviceId: new Types.ObjectId(serviceId),
+          nameAtTime: line.nameAtTime?.trim() || serviceDoc.name,
+          qty,
+          unitPriceAtTime: this.decimalFromNumber(unitPrice),
+          unitCostAtTime: this.decimalFromNumber(unitCost),
+        };
+      });
+      wo.servicesUsed = normalizedServices;
+    }
+
+    const hasBillingActivity =
+      payload.billableLaborAmount !== undefined ||
+      payload.servicesUsed !== undefined ||
+      payload.otherCharges !== undefined;
+    if (hasBillingActivity && wo.status === WorkOrderStatus.SCHEDULED) {
+      wo.status = WorkOrderStatus.IN_PROGRESS;
     }
 
     await wo.save();
@@ -631,8 +771,8 @@ export class WorkOrdersService {
       });
     }
 
-    // If work is completed, finalize invoice/payment and close the work order
-    if (wo.status === WorkOrderStatus.COMPLETED) {
+    // Billing submission closes/updates invoice and marks work order closed.
+    if (wo.status !== WorkOrderStatus.CANCELED) {
       const invoiceData = this.buildInvoicePayload(wo);
       if (invoiceData.lineItems.length > 0) {
         // Upsert invoice
@@ -679,21 +819,23 @@ export class WorkOrdersService {
           });
         }
 
-        wo.status = WorkOrderStatus.CLOSED;
-        await wo.save();
-
-        if (performerObjectId) {
-          await this.audit.record({
-            actionType: "WORK_ORDER_BILLING_SUBMIT",
-            entityType: "WorkOrder",
-            entityId: wo._id.toString(),
-            performedByEmployeeId: performerObjectId,
-            after: {
-              status: wo.status,
-              invoiceId: invoice._id.toString(),
-              paymentId: payment._id.toString(),
-            },
-          });
+        if (wo.status !== WorkOrderStatus.CLOSED) {
+          wo.status = WorkOrderStatus.CLOSED;
+          wo.deliveredAt = new Date();
+          await wo.save();
+          if (performerObjectId) {
+            await this.audit.record({
+              actionType: "WORK_ORDER_BILLING_SUBMIT",
+              entityType: "WorkOrder",
+              entityId: wo._id.toString(),
+              performedByEmployeeId: performerObjectId,
+              after: {
+                status: wo.status,
+                invoiceId: invoice._id.toString(),
+                paymentId: payment._id.toString(),
+              },
+            });
+          }
         }
       }
     }
@@ -706,17 +848,16 @@ export class WorkOrdersService {
     employees: { employeeId: string; roleType: string }[],
     performedBy: string
   ) {
-    const wo = await this.workOrderModel.findByIdAndUpdate(
-      id,
-      {
-        assignedEmployees: employees.map((e) => ({
-          employeeId: new Types.ObjectId(e.employeeId),
-          roleType: e.roleType,
-        })),
-      },
-      { new: true }
-    );
+    const wo = await this.workOrderModel.findById(id);
     if (!wo) throw new NotFoundException("Work order not found");
+    wo.assignedEmployees = employees.map((e) => ({
+      employeeId: new Types.ObjectId(e.employeeId),
+      roleType: e.roleType,
+    }));
+    if (wo.status === WorkOrderStatus.SCHEDULED && employees.length > 0) {
+      wo.status = WorkOrderStatus.IN_PROGRESS;
+    }
+    await wo.save();
     const performerObjectId = performedBy ? toObjectId(performedBy) : null;
     if (performerObjectId) {
       await this.audit.record({
@@ -724,7 +865,7 @@ export class WorkOrdersService {
         entityType: "WorkOrder",
         entityId: wo._id.toString(),
         performedByEmployeeId: performerObjectId,
-        after: { assignedEmployees: employees },
+        after: { assignedEmployees: employees, status: wo.status },
       });
     }
     return wo;
@@ -732,11 +873,10 @@ export class WorkOrdersService {
 
   async listAssignableEmployees() {
     const allowedRoles = [
-      "TECHNICIAN",
-      "PAINTER",
       "SERVICE_ADVISOR",
       "OPS_MANAGER",
       "OWNER_ADMIN",
+      "INVENTORY_MANAGER",
     ];
     return this.userModel
       .find({ role: { $in: allowedRoles }, isActive: true })
@@ -779,7 +919,7 @@ export class WorkOrdersService {
       );
     };
 
-    const maxAttempts = 4;
+    const maxAttempts = 8;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const session = await this.connection.startSession();
       session.startTransaction();
@@ -817,6 +957,9 @@ export class WorkOrdersService {
           sellingPriceAtTime: this.decimalFromNumber(sellingPriceNum),
           costAtTime: this.decimalFromNumber(avgCostNum),
         });
+        if (wo.status === WorkOrderStatus.SCHEDULED) {
+          wo.status = WorkOrderStatus.IN_PROGRESS;
+        }
         await wo.save({ session });
 
         const trx = await this.trxModel.create(
@@ -882,12 +1025,16 @@ export class WorkOrdersService {
       clockOutAt,
       durationMinutes,
     });
+    if (wo.status === WorkOrderStatus.SCHEDULED) {
+      wo.status = WorkOrderStatus.IN_PROGRESS;
+      await wo.save();
+    }
     await this.audit.record({
       actionType: "TIME_LOG",
       entityType: "WorkOrder",
       entityId: wo._id.toString(),
       performedByEmployeeId: new Types.ObjectId(params.employeeId),
-      after: { durationMinutes },
+      after: { durationMinutes, workOrderStatus: wo.status },
     });
     return log;
   }
@@ -897,36 +1044,18 @@ export class WorkOrdersService {
     if (!wo) throw new NotFoundException("Work order not found");
     const canCreate =
       user.permissions?.includes(Permissions.TIMELOGS_CREATE_SELF) ||
-      user.permissions?.includes(Permissions.TIMELOGS_READ_ALL) ||
-      ["TECHNICIAN", "PAINTER"].includes(user.role || "");
+      user.permissions?.includes(Permissions.TIMELOGS_READ_ALL);
     if (!canCreate) throw new ForbiddenException("No permission to clock in");
     const userId = resolveUserId(user);
     const userObjectId = toObjectId(userId);
     if (!userObjectId) throw new ForbiddenException("Invalid user id");
     const assignedIds =
       wo.assignedEmployees?.map((a) => a.employeeId.toString()) || [];
-    const isTechOrPainter = ["TECHNICIAN", "PAINTER"].includes(user.role || "");
     if (
       !assignedIds.includes(userId) &&
       !user.permissions?.includes(Permissions.TIMELOGS_READ_ALL)
     ) {
-      if (isTechOrPainter) {
-        // Auto-assign tech/painter on first clock-in regardless of status
-        wo.assignedEmployees.push({
-          employeeId: userObjectId,
-          roleType: user.role || "TECHNICIAN",
-        });
-        await wo.save();
-        await this.audit.record({
-          actionType: "WORK_ORDER_ASSIGN",
-          entityType: "WorkOrder",
-          entityId: wo._id.toString(),
-          performedByEmployeeId: userObjectId,
-          after: { autoAssigned: true, role: user.role || "TECHNICIAN" },
-        });
-      } else {
-        throw new ForbiddenException("Not assigned");
-      }
+      throw new ForbiddenException("Not assigned");
     }
     const open = await this.timeLogModel.findOne({
       workOrderId: wo._id,
@@ -961,8 +1090,7 @@ export class WorkOrdersService {
     if (!wo) throw new NotFoundException("Work order not found");
     const canCreate =
       user.permissions?.includes(Permissions.TIMELOGS_CREATE_SELF) ||
-      user.permissions?.includes(Permissions.TIMELOGS_READ_ALL) ||
-      ["TECHNICIAN", "PAINTER"].includes(user.role || "");
+      user.permissions?.includes(Permissions.TIMELOGS_READ_ALL);
     if (!canCreate) throw new ForbiddenException("No permission to clock out");
     const userId = resolveUserId(user);
     const userObjectId = toObjectId(userId);
@@ -988,12 +1116,11 @@ export class WorkOrdersService {
     );
     await open.save();
 
-    // Auto-update work order status to COMPLETED when clocking out
+    // Keep active work orders in progress while time logging.
     if (
-      wo.status !== WorkOrderStatus.COMPLETED &&
-      wo.status !== WorkOrderStatus.CLOSED
+      wo.status === WorkOrderStatus.SCHEDULED
     ) {
-      wo.status = WorkOrderStatus.COMPLETED;
+      wo.status = WorkOrderStatus.IN_PROGRESS;
       await wo.save();
     }
 
@@ -1019,11 +1146,6 @@ export class WorkOrdersService {
     authorId: string;
     message: string;
   }) {
-    const author = await this.userModel.findById(params.authorId);
-    const isTechOrPainter = author?.role && ["TECHNICIAN", "PAINTER"].includes(author.role);
-    if (isTechOrPainter) {
-      throw new ForbiddenException("Technicians and painters cannot add notes");
-    }
     const wo = await this.workOrderModel.findById(params.workOrderId);
     if (!wo) throw new NotFoundException("Work order not found");
     wo.notes = wo.notes || [];
@@ -1032,13 +1154,16 @@ export class WorkOrdersService {
       message: params.message,
       createdAt: new Date(),
     });
+    if (wo.status === WorkOrderStatus.SCHEDULED) {
+      wo.status = WorkOrderStatus.IN_PROGRESS;
+    }
     await wo.save();
     await this.audit.record({
       actionType: "NOTE_ADDED",
       entityType: "WorkOrder",
       entityId: wo._id.toString(),
       performedByEmployeeId: new Types.ObjectId(params.authorId),
-      after: { message: params.message },
+      after: { message: params.message, workOrderStatus: wo.status },
     });
     return wo.notes;
   }
@@ -1051,10 +1176,10 @@ export class WorkOrdersService {
     const wo = await this.workOrderModel.findById(id);
     if (!wo) throw new NotFoundException("Work order not found");
 
-    // Only allow payment if work order is COMPLETED
-    if (wo.status !== WorkOrderStatus.COMPLETED) {
+    // Only allow payment if work order is CLOSED
+    if (wo.status !== WorkOrderStatus.CLOSED) {
       throw new BadRequestException(
-        `Work order must be COMPLETED to take payment. Current status: ${wo.status}`
+        `Work order must be CLOSED to take payment. Current status: ${wo.status}`
       );
     }
 
@@ -1088,10 +1213,6 @@ export class WorkOrdersService {
         ],
         { session }
       );
-
-      // Close the work order
-      wo.status = WorkOrderStatus.CLOSED;
-      await wo.save({ session });
 
       // Audit the payment
       const performerId = resolveUserId(user);

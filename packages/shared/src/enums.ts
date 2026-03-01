@@ -1,9 +1,8 @@
 export const WorkOrderStatus = {
   SCHEDULED: "Scheduled",
   IN_PROGRESS: "In Progress",
-  WAITING_PARTS: "Waiting Parts",
-  COMPLETED: "Completed",
-  CLOSED: "Closed"
+  CLOSED: "Closed",
+  CANCELED: "Canceled"
 } as const;
 
 export type WorkOrderStatusType = (typeof WorkOrderStatus)[keyof typeof WorkOrderStatus];

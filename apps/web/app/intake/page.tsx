@@ -23,8 +23,8 @@ type FormState = {
   color: string;
   plate: string;
   vin: string;
-  mileage: string;
   complaint: string;
+  oilLevelPct: number;
 };
 
 const initialForm: FormState = {
@@ -38,8 +38,8 @@ const initialForm: FormState = {
   color: "",
   plate: "",
   vin: "",
-  mileage: "",
-  complaint: ""
+  complaint: "",
+  oilLevelPct: 50,
 };
 
 const steps = [
@@ -112,7 +112,6 @@ export default function IntakePage() {
         color: form.color || undefined,
         plate: form.plate || undefined,
         vin: form.vin || undefined,
-        mileage: form.mileage ? Number(form.mileage) : undefined
       });
       const vehicleId = vehicleRes.data._id;
 
@@ -121,7 +120,8 @@ export default function IntakePage() {
         vehicleId,
         complaint: form.complaint,
         status: "Scheduled",
-        assignedEmployees: []
+        assignedEmployees: [],
+        oilLevelPct: form.oilLevelPct
       });
       return workOrderRes.data;
     },
@@ -148,6 +148,8 @@ export default function IntakePage() {
     if (!form.phone.trim()) errors.phone = "Phone is required";
     if (!form.vehicleMake.trim()) errors.vehicleMake = "Make is required";
     if (!form.vehicleModel.trim()) errors.vehicleModel = "Model is required";
+    if (!form.plate.trim()) errors.plate = "Plate is required";
+    if (!Number.isFinite(form.oilLevelPct)) errors.oilLevelPct = "Oil level is required";
     if (!form.complaint.trim()) errors.complaint = "Complaint is required";
     if (form.vehicleYear && !/^[0-9]{4}$/.test(form.vehicleYear)) errors.vehicleYear = "Use YYYY format";
     if (form.email && !/.+@.+/.test(form.email)) errors.email = "Invalid email format";
@@ -360,13 +362,14 @@ export default function IntakePage() {
                 </label>
               </div>
               <label className="text-sm text-muted-foreground">
-                Plate
+                Plate <span className="text-red-400">*</span>
                 <input
                   placeholder="Plate"
                   value={form.plate}
                   onChange={(e) => setForm({ ...form, plate: e.target.value })}
                   className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
+                {fieldErrors.plate && <span className="text-[11px] text-red-400">{fieldErrors.plate}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 VIN
@@ -377,15 +380,50 @@ export default function IntakePage() {
                   className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
               </label>
-              <label className="text-sm text-muted-foreground">
-                Mileage
-                <input
-                  placeholder="Mileage"
-                  value={form.mileage}
-                  onChange={(e) => setForm({ ...form, mileage: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                />
-              </label>
+              <div className="rounded-lg border border-border bg-card px-3 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">
+                      Oil level <span className="text-red-400">*</span>
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">Set the current oil level as a percentage.</p>
+                  </div>
+                  <span className="text-sm font-semibold text-foreground">{form.oilLevelPct}%</span>
+                </div>
+                <div className="mt-3">
+                  <div className="relative h-28">
+                    <div className="absolute inset-x-0 bottom-0 h-20 overflow-hidden">
+                      <div className="h-40 w-full rounded-t-full border-2 border-border bg-muted/40"></div>
+                    </div>
+                    <div
+                      className="absolute bottom-0 left-1/2 h-16 w-0.5 bg-foreground origin-bottom transition-transform"
+                      style={{ transform: `translateX(-50%) rotate(${(form.oilLevelPct - 50) * 1.8}deg)` }}
+                    />
+                    <div className="absolute bottom-0 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-foreground"></div>
+                    <div className="absolute bottom-1 left-2 text-[11px] text-muted-foreground">Empty</div>
+                    <div className="absolute bottom-1 right-2 text-[11px] text-muted-foreground">Full</div>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={form.oilLevelPct}
+                    onChange={(e) => {
+                      setForm({ ...form, oilLevelPct: Number(e.target.value) });
+                      setFieldErrors((prev) => {
+                        const next = { ...prev };
+                        delete next.oilLevelPct;
+                        return next;
+                      });
+                    }}
+                    className="mt-3 w-full accent-primary"
+                    aria-label="Oil level percentage"
+                  />
+                </div>
+                {fieldErrors.oilLevelPct && (
+                  <span className="text-[11px] text-red-400">{fieldErrors.oilLevelPct}</span>
+                )}
+              </div>
             </div>
 
             {/* Work order */}

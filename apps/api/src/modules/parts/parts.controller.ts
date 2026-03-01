@@ -107,11 +107,6 @@ export class PartsController {
     @CurrentUser() user: AuthUser,
     @Headers("idempotency-key") idempotencyKey?: string
   ) {
-    // Prevent technicians and painters from receiving inventory
-    if (user.role && ["TECHNICIAN", "PAINTER"].includes(user.role)) {
-      throw new ForbiddenException("Technicians and painters cannot receive inventory");
-    }
-
     return this.parts.receiveInventory({
       partId: body.partId,
       qty: Number(body.qty),

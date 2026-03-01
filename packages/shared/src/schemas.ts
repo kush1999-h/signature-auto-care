@@ -31,8 +31,7 @@ export const vehicleSchema = z.object({
   plate: z.string().optional(),
   make: z.string().optional(),
   model: z.string().optional(),
-  year: z.number().optional(),
-  mileage: z.number().optional()
+  year: z.number().optional()
 });
 
 export const partSchema = z.object({
@@ -97,23 +96,46 @@ export const workOrderSchema = z.object({
       })
     )
     .optional(),
+  servicesUsed: z
+    .array(
+      z.object({
+        serviceId: z.string(),
+        nameAtTime: z.string(),
+        qty: z.number(),
+        unitPriceAtTime: z.number(),
+        unitCostAtTime: z.number().optional()
+      })
+    )
+    .optional(),
   otherCharges: z
     .array(
       z.object({
         name: z.string(),
-        amount: z.number()
+        amount: z.number(),
+        costAtTime: z.number().optional()
       })
     )
     .optional()
 });
 
 export const invoiceLineItemSchema = z.object({
-  type: z.enum(["PART", "LABOR", "OTHER"]),
+  type: z.enum(["PART", "LABOR", "SERVICE", "OTHER"]),
   description: z.string(),
   quantity: z.number().default(1),
   unitPrice: z.number(),
   total: z.number(),
   costAtTime: z.number().optional()
+});
+
+export const serviceSchema = z.object({
+  _id: z.string().optional(),
+  name: z.string(),
+  code: z.string(),
+  category: z.string().optional(),
+  defaultPrice: z.number(),
+  defaultCost: z.number().optional(),
+  taxable: z.boolean().optional(),
+  isActive: z.boolean().optional()
 });
 
 export const invoiceSchema = z.object({

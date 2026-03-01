@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { InjectConnection, InjectModel } from "@nestjs/mongoose";
 import { Connection, Model, Types } from "mongoose";
-import { Expense, ExpenseDocument, Payable, PayableDocument } from "../../schemas";
+import { Payable, PayableDocument } from "../../schemas";
 import { AuditService } from "../audit/audit.service";
 
 type PayableUpdatePayload = Partial<Payable> & {
@@ -14,7 +14,6 @@ type PayableUpdatePayload = Partial<Payable> & {
 export class PayablesService {
   constructor(
     @InjectModel(Payable.name) private payableModel: Model<PayableDocument>,
-    @InjectModel(Expense.name) private expenseModel: Model<ExpenseDocument>,
     @InjectConnection() private connection: Connection,
     private audit: AuditService
   ) {}
@@ -63,40 +62,6 @@ export class PayablesService {
       const updated = await this.payableModel.findByIdAndUpdate(id, next, { new: true, session });
       if (!updated) throw new NotFoundException("Payable not found");
 
-      let expenseId: string | undefined;
-      if (nextStatus === "PAID" && previousStatus !== "PAID") {
-        const amount = Number(updated.amount?.toString() || 0);
-        const noteParts = [
-          "Payable paid",
-          updated.vendorName ? `Vendor: ${updated.vendorName}` : null,
-          updated.note ? `Note: ${updated.note}` : null,
-          `Payable: ${updated._id.toString()}`
-        ].filter(Boolean);
-        const [expense] = await this.expenseModel.create(
-          [
-            {
-              category: updated.category || "Supplies",
-              amount: this.decimalFromNumber(amount),
-              expenseDate: updated.paidAt || new Date(),
-              note: noteParts.join(" | ")
-            }
-          ],
-          { session }
-        );
-        expenseId = expense._id.toString();
-        if (payload.performedBy) {
-          await this.audit.record({
-            actionType: "EXPENSE_CREATE",
-            entityType: "Expense",
-            entityId: expenseId,
-            performedByEmployeeId: new Types.ObjectId(payload.performedBy),
-            performedByName: payload.performedByName,
-            performedByRole: payload.performedByRole,
-            after: expense.toObject()
-          });
-        }
-      }
-
       if (payload.performedBy) {
         await this.audit.record({
           actionType: "PAYABLE_UPDATE",
@@ -106,10 +71,7 @@ export class PayablesService {
           performedByName: payload.performedByName,
           performedByRole: payload.performedByRole,
           before: before.toObject(),
-          after: {
-            ...updated.toObject(),
-            ...(expenseId ? { expenseId } : {})
-          }
+          after: updated.toObject()
         });
       }
 

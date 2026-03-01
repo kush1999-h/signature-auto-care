@@ -1,5 +1,6 @@
 import mongoose, { Connection } from "mongoose";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
+import { Permissions } from "@signature-auto-care/shared";
 import { WorkOrdersService } from "../src/modules/work-orders/work-orders.service";
 import { AuditService } from "../src/modules/audit/audit.service";
 import {
@@ -7,6 +8,8 @@ import {
   WorkOrderSchema,
   Part,
   PartSchema,
+  Service,
+  ServiceSchema,
   Invoice,
   InvoiceSchema,
   TimeLog,
@@ -51,6 +54,7 @@ describe("Work order close -> invoice generation", () => {
       workOrderModel,
       connection.model(TimeLog.name, TimeLogSchema),
       partModel,
+      connection.model(Service.name, ServiceSchema),
       connection.model(InventoryTransaction.name, InventoryTransactionSchema),
       connection.model(Customer.name, CustomerSchema),
       connection.model(Vehicle.name, VehicleSchema),
@@ -114,6 +118,9 @@ describe("Work order close -> invoice generation", () => {
       role: "SERVICE_ADVISOR",
     });
 
+    const closedWorkOrder = await connection.model(WorkOrder.name).findById(wo._id);
+    expect(closedWorkOrder?.deliveredAt).toBeTruthy();
+
     const invoice = await connection
       .model(Invoice.name)
       .findOne({ workOrderId: wo._id });
@@ -164,12 +171,19 @@ describe("Work order close -> invoice generation", () => {
         billableLaborAmount: 200,
         otherCharges: [{ name: "Blend", amount: 50 }],
       },
-      { userId, role: "OPS_MANAGER" }
+      {
+        userId,
+        role: "OPS_MANAGER",
+        permissions: [Permissions.WORKORDERS_BILLING_EDIT],
+      }
     );
     await service.updateStatus(wo._id.toString(), "Closed", {
       userId,
       role: "SERVICE_ADVISOR",
     });
+
+    const closedWorkOrder = await connection.model(WorkOrder.name).findById(wo._id);
+    expect(closedWorkOrder?.deliveredAt).toBeTruthy();
 
     const invoices = await connection
       .model(Invoice.name)
@@ -177,5 +191,50 @@ describe("Work order close -> invoice generation", () => {
     expect(invoices).toHaveLength(1);
     const totals = Number(invoices[0].total.toString());
     expect(totals).toBeCloseTo(200 + 2 * 60 + 50);
+  });
+
+  test("reopening a closed work order clears deliveredAt", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    const vehicleId = new mongoose.Types.ObjectId();
+    const userId = new mongoose.Types.ObjectId().toString();
+
+    const part = await connection.model(Part.name).create({
+      partName: "Seal",
+      sku: "SEA-1",
+      purchasePrice: 10,
+      sellingPrice: 20,
+      avgCost: 12,
+    });
+
+    const wo = await connection.model(WorkOrder.name).create({
+      customerId,
+      vehicleId,
+      status: "In Progress",
+      billableLaborAmount: mongoose.Types.Decimal128.fromString("50"),
+      partsUsed: [
+        {
+          partId: part._id,
+          qty: 1,
+          sellingPriceAtTime: part.sellingPrice,
+          costAtTime: part.avgCost,
+        },
+      ],
+    });
+
+    await service.updateStatus(wo._id.toString(), "Closed", {
+      userId,
+      role: "SERVICE_ADVISOR",
+    });
+
+    let closedWorkOrder = await connection.model(WorkOrder.name).findById(wo._id);
+    expect(closedWorkOrder?.deliveredAt).toBeTruthy();
+
+    await service.updateStatus(wo._id.toString(), "In Progress", {
+      userId,
+      role: "SERVICE_ADVISOR",
+    });
+
+    closedWorkOrder = await connection.model(WorkOrder.name).findById(wo._id);
+    expect(closedWorkOrder?.deliveredAt).toBeNull();
   });
 });

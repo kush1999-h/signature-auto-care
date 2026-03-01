@@ -13,7 +13,11 @@ export class ExpensesService {
   ) {}
 
   async list() {
-    return this.expenseModel.find({ isDeleted: { $ne: true } }).sort({ expenseDate: -1 }).exec();
+    const expenses = await this.expenseModel
+      .find({ isDeleted: { $ne: true } })
+      .sort({ expenseDate: -1 })
+      .exec();
+    return expenses.filter((exp) => !isInventoryLinkedExpense(exp));
   }
 
   async create(payload: Partial<Expense> & { performedBy?: string }) {
@@ -78,4 +82,11 @@ export class ExpensesService {
     });
     return { success: true };
   }
+}
+
+function isInventoryLinkedExpense(expense: Expense) {
+  const category = String(expense.category || "").toLowerCase();
+  if (category !== "supplies") return false;
+  const note = String(expense.note || "");
+  return note.includes("Part: ") || note.startsWith("Payable paid");
 }

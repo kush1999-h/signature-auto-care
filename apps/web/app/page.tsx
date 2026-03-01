@@ -80,7 +80,6 @@ export default function Dashboard() {
   const canShowAdminDashboard = isAdminLike || isAccountant || canViewReports;
   const isServiceAdvisor = role === "SERVICE_ADVISOR";
   const isInventoryManager = role === "INVENTORY_MANAGER";
-  const isTechOrPainter = role === "TECHNICIAN" || role === "PAINTER";
   const isOwner = role === "OWNER_ADMIN";
 
   useEffect(() => {
@@ -134,7 +133,14 @@ export default function Dashboard() {
     queryKey: ["sales", rangeDates.from, rangeDates.to],
     queryFn: async () => {
       const res = await api.get("/reports/sales", { params: { from: rangeDates.from, to: rangeDates.to } });
-      return res.data as { invoices: InvoiceSummary[]; partsRevenue?: number; laborRevenue?: number; otherRevenue?: number; revenue?: number };
+      return res.data as {
+        invoices: InvoiceSummary[];
+        partsRevenue?: number;
+        laborRevenue?: number;
+        serviceRevenue?: number;
+        otherRevenue?: number;
+        revenue?: number;
+      };
     },
     enabled: canShowAdminDashboard && canReadSales
   });
@@ -176,6 +182,7 @@ export default function Dashboard() {
   const pieData = [
     { name: "Parts", value: salesQuery.data?.partsRevenue || 0 },
     { name: "Labor", value: salesQuery.data?.laborRevenue || 0 },
+    { name: "Services", value: salesQuery.data?.serviceRevenue || 0 },
     {
       name: "Other",
       value: salesQuery.data?.otherRevenue || 0
@@ -261,7 +268,7 @@ export default function Dashboard() {
   const workOrders = useQuery({
     queryKey: ["wo-scheduled-mini", woStatusFilter],
     queryFn: async () => (await api.get("/work-orders", { params: { status: woStatusFilter } })).data,
-    enabled: isTechOrPainter || isServiceAdvisor
+    enabled: isServiceAdvisor
   });
 
   const [inventorySearch, setInventorySearch] = useState("");
@@ -269,7 +276,7 @@ export default function Dashboard() {
   const inventoryLookup = useQuery({
     queryKey: ["inventory-mini", debouncedInv],
     queryFn: async () => (await api.get("/parts", { params: { search: debouncedInv, limit: 5 } })).data,
-    enabled: isTechOrPainter && debouncedInv.length > 1
+    enabled: isInventoryManager && debouncedInv.length > 1
   });
 
   const [purgeConfirm, setPurgeConfirm] = useState("");
@@ -438,7 +445,7 @@ export default function Dashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="font-semibold text-foreground">Accounts</p>
-              <p className="text-sm text-muted-foreground">Receivables, expenses, and closures</p>
+              <p className="text-sm text-muted-foreground">Receivables, operating expenses, and closures</p>
             </div>
             <div className="flex gap-2">
               <Button asChild variant="secondary">
@@ -450,7 +457,7 @@ export default function Dashboard() {
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Expenses are cash-basis. Payables track credit purchases separately.
+            Operating expenses exclude inventory purchases; payables track credit inventory purchases separately.
             {canReadPayables && report.openPayables > 0
               ? ` Open payables: Tk. ${formatMoney(report.openPayables)}.`
               : ""}
@@ -552,29 +559,6 @@ export default function Dashboard() {
     </div>
   );
 
-  const techDashboard = (
-    <div className="space-y-6">
-      <div className="glass p-4 rounded-xl space-y-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-semibold text-foreground">Assigned / Scheduled</p>
-            <p className="text-sm text-muted-foreground">Update to In Progress, Waiting Parts, or Completed.</p>
-          </div>
-          <Button asChild size="sm" variant="secondary">
-            <a href="/work-orders">Work orders</a>
-          </Button>
-        </div>
-      </div>
-      <div className="glass p-4 rounded-xl space-y-3">
-        <p className="font-semibold text-foreground">Tech view</p>
-        <p className="text-sm text-muted-foreground">Status and clock-in/out controls are inside each work order.</p>
-        <Button asChild variant="outline">
-          <a href="/inventory">View inventory</a>
-        </Button>
-      </div>
-    </div>
-  );
-
   const inventoryManagerDashboard = (
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -629,9 +613,8 @@ export default function Dashboard() {
 
   let content = adminDashboard;
   if (isServiceAdvisor) content = serviceAdvisorDashboard;
-  if (isTechOrPainter) content = techDashboard;
   if (isInventoryManager) content = inventoryManagerDashboard;
-  if (!canShowAdminDashboard && !isServiceAdvisor && !isInventoryManager && !isTechOrPainter) {
+  if (!canShowAdminDashboard && !isServiceAdvisor && !isInventoryManager) {
     content = (
       <div className="glass p-6 rounded-xl">
         <p className="font-semibold text-foreground">Welcome</p>

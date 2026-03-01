@@ -36,6 +36,7 @@ type InvoiceSummary = {
   invoiceNumber?: string;
   workOrderId?: string;
   createdAt: string;
+  deliveredAt?: string | null;
   total?: number;
   lineItems?: { type?: string; total?: number }[];
 };
@@ -44,6 +45,7 @@ type SalesReport = {
   invoices: InvoiceSummary[];
   partsRevenue?: number;
   laborRevenue?: number;
+  serviceRevenue?: number;
   otherRevenue?: number;
   revenue?: number;
 };
@@ -95,6 +97,8 @@ const formatMoney = (value?: number) => {
   const num = Number(value || 0);
   return Number.isFinite(num) ? num.toFixed(2) : "0.00";
 };
+
+const invoiceDateOut = (inv: InvoiceSummary) => inv.deliveredAt || inv.createdAt;
 
 export default function ReportsPage() {
   const { session } = useAuth();
@@ -187,6 +191,7 @@ export default function ReportsPage() {
   const revenueTotal = Number(summary.revenue || 0);
   const partsRevenue = Number(sales.data?.partsRevenue || 0);
   const laborRevenue = Number(sales.data?.laborRevenue || 0);
+  const serviceRevenue = Number(sales.data?.serviceRevenue || 0);
   const otherRevenue = Number(sales.data?.otherRevenue || 0);
   const avgInvoice = invoiceCount ? revenueTotal / invoiceCount : 0;
   const grossMargin = revenueTotal > 0 ? (Number(summary.grossProfit || 0) / revenueTotal) * 100 : 0;
@@ -196,8 +201,8 @@ export default function ReportsPage() {
     summary.openPayables !== undefined ? summary.openPayables : creditPurchasesTotal
   );
   const expenseSubtitle = canReadPayables
-    ? `Cash Tk. ${formatMoney(cashExpensesTotal)} | Open payables Tk. ${formatMoney(openPayablesTotal)}`
-    : `Cash Tk. ${formatMoney(cashExpensesTotal)}`;
+    ? `Operating Tk. ${formatMoney(cashExpensesTotal)} | Open payables Tk. ${formatMoney(openPayablesTotal)}`
+    : `Operating Tk. ${formatMoney(cashExpensesTotal)}`;
   const canShowPayables = canReadProfit && canReadPayables;
 
   const expenseItems = useMemo(() => {
@@ -208,7 +213,7 @@ export default function ReportsPage() {
   }, [summary.expensesBreakdown]);
 
   const revenueByDateMap = useMemo(
-    () => sumByDate(invoices.map((inv) => ({ date: inv.createdAt, amount: calcInvoiceRevenue(inv) }))),
+    () => sumByDate(invoices.map((inv) => ({ date: invoiceDateOut(inv), amount: calcInvoiceRevenue(inv) }))),
     [invoices]
   );
   const expensesByDateMap = useMemo(() => sumByDate(expenseItems), [expenseItems]);
@@ -226,10 +231,10 @@ export default function ReportsPage() {
 
   const trendByMonth = useMemo(() => {
     const revenueMap = sumByMonth(
-      invoices.map((inv) => ({ date: inv.createdAt, amount: calcInvoiceRevenue(inv) }))
+      invoices.map((inv) => ({ date: invoiceDateOut(inv), amount: calcInvoiceRevenue(inv) }))
     );
     const cogsMap = sumByMonth(
-      invoices.map((inv) => ({ date: inv.createdAt, amount: calcInvoiceCogs(inv) }))
+      invoices.map((inv) => ({ date: invoiceDateOut(inv), amount: calcInvoiceCogs(inv) }))
     );
     const expenseMap = sumByMonth(expenseItems);
     const months = Array.from(
@@ -285,6 +290,7 @@ export default function ReportsPage() {
   const breakdown = [
     { name: "Parts", value: partsRevenue },
     { name: "Labor", value: laborRevenue },
+    { name: "Services", value: serviceRevenue },
     { name: "Other", value: otherRevenue }
   ];
 
@@ -453,7 +459,7 @@ export default function ReportsPage() {
             <MetricCard title="Revenue" value={`Tk. ${formatMoney(summary.revenue)}`} />
             <MetricCard title="COGS" value={`Tk. ${formatMoney(summary.cogs)}`} accent="gray" />
             <MetricCard
-              title="Expenses (cash)"
+              title="Operating expenses"
               value={`Tk. ${formatMoney(summary.expenses)}`}
               subtitle={expenseSubtitle}
               accent="gray"
@@ -477,6 +483,7 @@ export default function ReportsPage() {
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Mix</p>
               <p className="text-sm text-muted-foreground">Parts Tk. {formatMoney(partsRevenue)}</p>
               <p className="text-sm text-muted-foreground">Labor Tk. {formatMoney(laborRevenue)}</p>
+              <p className="text-sm text-muted-foreground">Services Tk. {formatMoney(serviceRevenue)}</p>
               <p className="text-sm text-muted-foreground">Other Tk. {formatMoney(otherRevenue)}</p>
             </div>
           </div>
@@ -553,7 +560,7 @@ export default function ReportsPage() {
                 <div key={inv._id} className="flex items-center justify-between rounded-md border border-border px-3 py-2">
                   <div>
                     <p className="font-semibold text-foreground">{inv.invoiceNumber || inv._id}</p>
-                    <p className="text-xs text-muted-foreground">{new Date(inv.createdAt).toLocaleDateString()}</p>
+                    <p className="text-xs text-muted-foreground">{new Date(invoiceDateOut(inv)).toLocaleDateString()}</p>
                   </div>
                   <div className="text-right">
                     <p className="font-semibold text-foreground">Tk. {calcInvoiceRevenue(inv).toFixed(2)}</p>
@@ -583,7 +590,9 @@ export default function ReportsPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
           <p className="font-semibold text-foreground">Sales & Expenses</p>
-          <p className="text-xs text-muted-foreground">Tables reflect the selected range. Expenses are cash-basis.</p>
+          <p className="text-xs text-muted-foreground">
+            Tables reflect the selected range. Operating expenses exclude inventory purchases.
+          </p>
           </div>
           <span className="text-xs text-muted-foreground">Range: {rangeDates.label}</span>
         </div>
@@ -607,7 +616,7 @@ export default function ReportsPage() {
               <Table>
                 <THead>
                   <TR>
-                    <TH>Date</TH>
+                    <TH>Date Out</TH>
                     <TH>Invoice</TH>
                     <TH>Work Order</TH>
                     <TH>Revenue</TH>
@@ -616,7 +625,7 @@ export default function ReportsPage() {
                 <TBody>
                   {invoices.map((inv) => (
                     <TR key={inv._id}>
-                      <TD>{new Date(inv.createdAt).toLocaleDateString()}</TD>
+                      <TD>{new Date(invoiceDateOut(inv)).toLocaleDateString()}</TD>
                       <TD>{inv.invoiceNumber || inv._id}</TD>
                       <TD>{inv.workOrderId || "--"}</TD>
                       <TD className="font-semibold text-foreground">Tk. {calcInvoiceRevenue(inv).toFixed(2)}</TD>
@@ -633,7 +642,7 @@ export default function ReportsPage() {
         </div>
 
         <div className="space-y-3">
-          <p className="font-semibold text-foreground">Cash Expenses</p>
+          <p className="font-semibold text-foreground">Operating Expenses</p>
           {!canReadExpenses ? (
             <p className="text-sm text-muted-foreground">You do not have permission to view expenses.</p>
           ) : expensesQuery.isLoading ? (

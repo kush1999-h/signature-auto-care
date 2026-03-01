@@ -94,18 +94,12 @@ export default function InventoryPage() {
   const canReceive = session?.user?.permissions?.includes("INVENTORY_RECEIVE");
   const canAdjust = session?.user?.permissions?.includes("INVENTORY_ADJUST");
   const canIssue = session?.user?.permissions?.includes("INVENTORY_ISSUE_TO_WORKORDER");
-  const canPriceUpdate = session?.user?.role
-    ? ["OWNER_ADMIN", "OPS_MANAGER"].includes(session.user.role) ||
-      session.user.permissions?.includes("INVENTORY_PRICE_UPDATE")
-    : false;
+  const canPriceUpdate = session?.user?.permissions?.includes("INVENTORY_PRICE_UPDATE");
   const canReport = session?.user?.permissions?.includes("INVENTORY_REPORTS_READ");
-  const canViewPurchases =
-    canReport && ["OWNER_ADMIN", "OPS_MANAGER", "INVENTORY_MANAGER"].includes(session?.user?.role || "");
+  const canViewPurchases = canReport;
   const canViewPayables = session?.user?.permissions?.includes("PAYABLES_READ");
   const canUpdatePayables = session?.user?.permissions?.includes("PAYABLES_UPDATE");
-  const isOwner = session?.user?.role === "OWNER_ADMIN";
-  const canAdjustRole = ["OWNER_ADMIN", "INVENTORY_MANAGER", "OPS_MANAGER"].includes(session?.user?.role || "");
-  const canAdjustAllowed = canAdjust && canAdjustRole;
+  const canAdjustAllowed = canAdjust;
 
   const [search, setSearch] = useState("");
   const [barcode, setBarcode] = useState("");
@@ -237,10 +231,9 @@ export default function InventoryPage() {
     mutationFn: async (payableId: string) => api.patch(`/payables/${payableId}`, { status: "PAID" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["payables"] });
-      qc.invalidateQueries({ queryKey: ["expenses"] });
       toast.show({
         title: "Payable marked as paid",
-        description: "Expense recorded and payables updated.",
+        description: "Payable updated successfully.",
         variant: "success"
       });
     },
@@ -930,7 +923,7 @@ export default function InventoryPage() {
           <div className="text-xs text-muted-foreground">
             Total cost: Tk. {formatMoney(receiveTotal)}.{" "}
             {receiveForm.paymentMethod === "CASH"
-              ? "Cash receives post a Supplies expense automatically."
+              ? "Cash receives increase inventory; costs are recognized in COGS when sold."
               : receiveForm.paymentMethod === "CREDIT"
               ? "Credit receives create an open payable."
               : "Select cash or credit to continue."}
@@ -1021,7 +1014,7 @@ export default function InventoryPage() {
       </Dialog>
 
       <Dialog open={adjustOpen} onClose={() => setAdjustOpen(false)} title="Adjust Stock">
-          {(!canAdjustAllowed) && <div className="text-sm text-amber-400 mb-2">Adjust Stock is restricted to Owner/Admin, Operations Manager, or Inventory Manager.</div>}
+          {(!canAdjustAllowed) && <div className="text-sm text-amber-400 mb-2">Adjust Stock requires INVENTORY_ADJUST permission.</div>}
         <div className="space-y-3">
           {adjustBanner && (
             <div className={`rounded-md px-3 py-2 text-sm ${adjustBanner.type === "error" ? "bg-destructive/10 text-destructive" : "bg-emerald-500/10 text-emerald-200"}`}>
@@ -1442,7 +1435,7 @@ export default function InventoryPage() {
                             onClick={() => {
                               openConfirm({
                                 title: "Mark payable as paid?",
-                                description: "This will create a cash expense and close the payable.",
+                                description: "This will mark the payable as paid.",
                                 confirmText: "Mark paid",
                                 onConfirm: () => payablesUpdate.mutate(p._id)
                               });

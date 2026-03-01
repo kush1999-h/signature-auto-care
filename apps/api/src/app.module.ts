@@ -12,6 +12,7 @@ import { ReportsModule } from "./modules/reports/reports.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { CustomersModule } from "./modules/customers/customers.module";
 import { AdminModule } from "./modules/admin/admin.module";
+import { ServicesModule } from "./modules/services/services.module";
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { AdminModule } from "./modules/admin/admin.module";
     AuthModule,
     UsersModule,
     CustomersModule,
+    ServicesModule,
     PartsModule,
     WorkOrdersModule,
     InvoicesModule,

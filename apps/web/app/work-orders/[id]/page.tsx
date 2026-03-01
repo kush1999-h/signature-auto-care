@@ -10,14 +10,16 @@ import Link from "next/link";
 import { Badge } from "../../../components/ui/badge";
 import { SegmentedControl } from "../../../components/ui/segmented-control";
 import { CurrencyInput } from "../../../components/ui/number-input";
+import { Dialog } from "../../../components/ui/dialog";
+import { Textarea } from "../../../components/ui/textarea";
+import { Table, THead, TBody, TR, TH, TD } from "../../../components/ui/table";
 import {
   AlertCircle,
-  CheckCircle2,
   Clock4,
-  Hourglass,
   Lock,
   PauseCircle,
-  PlayCircle
+  PlayCircle,
+  XCircle
 } from "lucide-react";
 import { useToast } from "../../../components/ui/toast";
 import { useDebounce } from "../../../lib/use-debounce";
@@ -39,6 +41,14 @@ type WorkOrderPart = {
   updatedAt?: string;
 };
 
+type WorkOrderService = {
+  serviceId: string;
+  nameAtTime?: string;
+  qty?: number;
+  unitPriceAtTime?: number;
+  unitCostAtTime?: number;
+};
+
 type WorkOrderTimeLog = {
   _id: string;
   employeeId?: string;
@@ -54,13 +64,18 @@ type WorkOrderDetail = {
     _id?: string;
     complaint?: string;
     status?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    deliveredAt?: string | null;
     notes?: WorkOrderNote[];
     billableLaborAmount?: number;
-    otherCharges?: { name?: string; amount?: number }[];
+    servicesUsed?: WorkOrderService[];
+    otherCharges?: { name?: string; amount?: number; costAtTime?: number }[];
   };
   assignedEmployees?: { _id?: string; employeeId?: string; id?: string; name?: string; email?: string; role?: string }[];
   invoice?: { invoiceNumber?: string; status?: string };
   partsUsed?: WorkOrderPart[];
+  servicesUsed?: WorkOrderService[];
   timeLogs?: WorkOrderTimeLog[];
   isAssigned?: boolean;
   activeLog?: WorkOrderTimeLog | null;
@@ -69,6 +84,7 @@ type WorkOrderDetail = {
   financials?: {
     labor?: number;
     partsTotal?: number;
+    servicesTotal?: number;
     otherTotal?: number;
     subtotal?: number;
     tax?: number;
@@ -91,29 +107,67 @@ type WorkOrderDetail = {
 
 type EmployeeLite = { _id?: string; name?: string; email?: string; role?: string; employeeId?: string; id?: string };
 type PartSearchItem = { _id: string; partName?: string; sku?: string; onHandQty?: number };
+type ServiceCatalogItem = {
+  _id: string;
+  name: string;
+  code: string;
+  category?: string;
+  defaultPrice?: number;
+  defaultCost?: number;
+  isActive?: boolean;
+};
 
 const formatMoney = (val: unknown) => {
   if (val === null || val === undefined) return "--";
-  const num =
-    typeof val === "number"
-      ? val
-      : Number(typeof val === "string" ? val : (val as { toString?: () => string })?.toString?.());
+  const num = toNumeric(val);
   return Number.isFinite(num) ? num.toFixed(2) : "--";
 };
 
-const calculateFinancials = (workOrder?: WorkOrderDetail["workOrder"], partsUsed: WorkOrderPart[] = []) => {
+const toNumeric = (val: unknown) => {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === "number") return Number.isFinite(val) ? val : 0;
+  if (typeof val === "string") {
+    const parsed = Number(val);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (
+    typeof val === "object" &&
+    val !== null &&
+    "$numberDecimal" in (val as Record<string, unknown>)
+  ) {
+    const parsed = Number((val as { $numberDecimal?: string }).$numberDecimal || 0);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof val === "object" && "toString" in val) {
+    const parsed = Number((val as { toString: () => string }).toString());
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+};
+
+const calculateFinancials = (
+  workOrder?: WorkOrderDetail["workOrder"],
+  partsUsed: WorkOrderPart[] = [],
+  servicesUsed: WorkOrderService[] = []
+) => {
   const labor = Number(workOrder?.billableLaborAmount || 0);
   const partsTotal = partsUsed.reduce((sum, part) => {
     const qty = Number(part.qty) || 0;
     const priceEach = Number(part.sellingPriceAtTime || 0);
     return sum + qty * priceEach;
   }, 0);
+  const servicesTotal = servicesUsed.reduce((sum, service) => {
+    const qty = Number(service.qty) || 0;
+    const priceEach = Number(service.unitPriceAtTime || 0);
+    return sum + qty * priceEach;
+  }, 0);
   const otherTotal = (workOrder?.otherCharges || []).reduce((sum: number, charge) => sum + Number(charge?.amount || 0), 0);
-  const subtotal = labor + partsTotal + otherTotal;
+  const subtotal = labor + partsTotal + servicesTotal + otherTotal;
   const tax = 0;
   return {
     labor,
     partsTotal,
+    servicesTotal,
     otherTotal,
     subtotal,
     tax,
@@ -148,9 +202,8 @@ const getStatusMeta = (status?: string) => {
   const meta: Record<string, { color: "default" | "secondary" | "warning" | "success"; icon: ReactNode }> = {
     Scheduled: { color: "secondary", icon: <Clock4 className="h-3.5 w-3.5" aria-hidden /> },
     "In Progress": { color: "default", icon: <PlayCircle className="h-3.5 w-3.5" aria-hidden /> },
-    "Waiting Parts": { color: "warning", icon: <Hourglass className="h-3.5 w-3.5" aria-hidden /> },
-    Completed: { color: "success", icon: <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> },
-    Closed: { color: "success", icon: <Lock className="h-3.5 w-3.5" aria-hidden /> }
+    Closed: { color: "success", icon: <Lock className="h-3.5 w-3.5" aria-hidden /> },
+    Canceled: { color: "warning", icon: <XCircle className="h-3.5 w-3.5" aria-hidden /> }
   };
   return meta[status || ""] || { color: "secondary", icon: <PauseCircle className="h-3.5 w-3.5" aria-hidden /> };
 };
@@ -181,21 +234,18 @@ export default function WorkOrderDetailPage() {
 
   const perms = useMemo(() => {
     const p = sessionUser?.permissions || [];
-    const role = sessionUser?.role;
     return {
-      role,
+      role: sessionUser?.role,
       canReadAll: p.includes("WORKORDERS_READ_ALL"),
       canUpdateStatus: p.includes("WORKORDERS_UPDATE_STATUS"),
-      canAssign:
-        p.includes("WORKORDERS_ASSIGN_EMPLOYEE") ||
-        role === "OWNER_ADMIN" ||
-        role === "OPS_MANAGER" ||
-        role === "SERVICE_ADVISOR",
-      canIssue: p.includes("INVENTORY_ISSUE_TO_WORKORDER") && role !== "TECHNICIAN" && role !== "PAINTER",
-      canAddNotes: p.includes("WORKORDERS_ADD_NOTES") && role !== "TECHNICIAN" && role !== "PAINTER",
+      canAssign: p.includes("WORKORDERS_ASSIGN_EMPLOYEE"),
+      canIssue: p.includes("INVENTORY_ISSUE_TO_WORKORDER"),
+      canAddNotes: p.includes("WORKORDERS_ADD_NOTES"),
+      canEditBilling: p.includes("WORKORDERS_BILLING_EDIT"),
+      canReadServices: p.includes("SERVICES_READ"),
       canReadAllLogs: p.includes("TIMELOGS_READ_ALL"),
       canReadSelfLogs: p.includes("TIMELOGS_READ_SELF"),
-      canCreateLogs: p.includes("TIMELOGS_CREATE_SELF") || role === "TECHNICIAN" || role === "PAINTER",
+      canCreateLogs: p.includes("TIMELOGS_CREATE_SELF"),
     };
   }, [sessionUser]);
 
@@ -204,14 +254,12 @@ export default function WorkOrderDetailPage() {
     queryFn: async () => (await api.get(`/work-orders/${id}/detail`)).data,
   });
 
-  const isTechOrPainter =
-    perms.role === "TECHNICIAN" || perms.role === "PAINTER";
-  const isServiceAdvisor = perms.role === "SERVICE_ADVISOR";
-  const statusOptions = ["Scheduled", "In Progress", "Waiting Parts", "Completed", "Closed"];
+  const canEditBilling = perms.canEditBilling;
+  const statusOptions = ["Scheduled", "In Progress", "Closed", "Canceled"];
 
   const statusMutation = useMutation({
-    mutationFn: (status: string) =>
-      api.patch(`/work-orders/${id}/status`, { status }),
+    mutationFn: (payload: { status: string; note?: string }) =>
+      api.patch(`/work-orders/${id}/status`, payload),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["work-order-detail", id] }),
   });
@@ -244,12 +292,16 @@ export default function WorkOrderDetailPage() {
   const [note, setNote] = useState("");
   const [laborInput, setLaborInput] = useState("");
   const [chargeRows, setChargeRows] = useState<
-    { name: string; amount: string }[]
-  >([{ name: "", amount: "" }]);
+    { name: string; amount: string; costAtTime: string }[]
+  >([{ name: "", amount: "", costAtTime: "" }]);
+  const [serviceRows, setServiceRows] = useState<
+    { serviceId: string; qty: string; unitPriceAtTime: string; unitCostAtTime: string; nameAtTime: string }[]
+  >([{ serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" }]);
   const [paymentMethod, setPaymentMethod] = useState("CASH");
   const [billingError, setBillingError] = useState("");
   const [laborError, setLaborError] = useState<string | null>(null);
   const [chargeErrors, setChargeErrors] = useState<Record<number, string>>({});
+  const [serviceErrors, setServiceErrors] = useState<Record<number, string>>({});
   const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [issueForm, setIssueForm] = useState({ partId: "", qty: 1 });
   const [partSearch, setPartSearch] = useState("");
@@ -258,6 +310,9 @@ export default function WorkOrderDetailPage() {
   const [notesSort, setNotesSort] = useState<"recent" | "oldest">("recent");
   const [logsSort, setLogsSort] = useState<"recent" | "oldest" | "duration">("recent");
   const [logAssigneeFilter, setLogAssigneeFilter] = useState<"all" | "mine">("all");
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [cancelNote, setCancelNote] = useState("");
+  const [cancelError, setCancelError] = useState("");
   const [timeTick, setTimeTick] = useState(0);
 
   useEffect(() => {
@@ -271,13 +326,20 @@ export default function WorkOrderDetailPage() {
     }
   }, [perms.canReadAllLogs]);
 
-  const canIssueHere = perms.canIssue && !isTechOrPainter;
+  const canIssueHere = perms.canIssue;
 
   const partSearchQuery = useQuery<{ items?: PartSearchItem[] }>({
     queryKey: ["part-search", debouncedPartSearch],
     queryFn: async () =>
       (await api.get("/parts", { params: { search: debouncedPartSearch, limit: 20 } })).data,
     enabled: canIssueHere,
+  });
+
+  const servicesCatalogQuery = useQuery<ServiceCatalogItem[]>({
+    queryKey: ["service-catalog", "active"],
+    queryFn: async () =>
+      (await api.get("/services", { params: { activeOnly: true } })).data as ServiceCatalogItem[],
+    enabled: perms.canReadServices && canEditBilling,
   });
 
   const assignableEmployees = useQuery<EmployeeLite[]>({
@@ -298,7 +360,14 @@ export default function WorkOrderDetailPage() {
   const billingMutation = useMutation({
     mutationFn: (payload: {
       billableLaborAmount: number;
-      otherCharges: { name: string; amount: number }[];
+      otherCharges: { name: string; amount: number; costAtTime?: number }[];
+      servicesUsed: {
+        serviceId: string;
+        qty: number;
+        unitPriceAtTime?: number;
+        unitCostAtTime?: number;
+        nameAtTime?: string;
+      }[];
       paymentMethod?: string;
     }) => api.patch(`/work-orders/${id}/billing`, payload),
     onSuccess: () => {
@@ -309,7 +378,7 @@ export default function WorkOrderDetailPage() {
 
   const isAssignedToWorkOrder = detail.data?.isAssigned ?? false;
   const issueRestrictionText = !canIssueHere
-    ? "Only Service Advisors or managers can issue parts for this work order."
+    ? "Missing permission to issue parts for this work order."
     : "";
 
   useEffect(() => {
@@ -321,16 +390,31 @@ export default function WorkOrderDetailPage() {
   useEffect(() => {
     if (!detail.data?.workOrder) return;
     const wo = detail.data.workOrder;
+    const laborValue = toNumeric(wo.billableLaborAmount);
     setLaborInput(
-      wo.billableLaborAmount !== null && wo.billableLaborAmount !== undefined
-        ? String(wo.billableLaborAmount)
-        : ""
+      laborValue > 0 ? String(laborValue) : ""
     );
     const charges = (wo.otherCharges || []).map((c) => ({
       name: c?.name || "",
-      amount: c?.amount !== undefined && c?.amount !== null ? String(c.amount) : "",
+      amount: toNumeric(c?.amount) > 0 ? String(toNumeric(c?.amount)) : "",
+      costAtTime:
+        toNumeric(c?.costAtTime) > 0 ? String(toNumeric(c?.costAtTime)) : "",
     }));
-    setChargeRows(charges.length ? charges : [{ name: "", amount: "" }]);
+    setChargeRows(charges.length ? charges : [{ name: "", amount: "", costAtTime: "" }]);
+    const services = (wo.servicesUsed || []).map((s) => ({
+      serviceId: s?.serviceId ? String(s.serviceId) : "",
+      qty: toNumeric(s?.qty) > 0 ? String(toNumeric(s?.qty)) : "1",
+      unitPriceAtTime:
+        toNumeric(s?.unitPriceAtTime) > 0 ? String(toNumeric(s?.unitPriceAtTime)) : "",
+      unitCostAtTime:
+        toNumeric(s?.unitCostAtTime) > 0 ? String(toNumeric(s?.unitCostAtTime)) : "",
+      nameAtTime: s?.nameAtTime || "",
+    }));
+    setServiceRows(
+      services.length
+        ? services
+        : [{ serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" }]
+    );
     setSelectedAssignees(
       (detail.data.assignedEmployees || [])
         .map((a) => {
@@ -343,6 +427,8 @@ export default function WorkOrderDetailPage() {
 
   const wo = detail.data?.workOrder;
   const partsUsed = useMemo(() => detail.data?.partsUsed ?? [], [detail.data?.partsUsed]);
+  const servicesUsed = useMemo(() => detail.data?.workOrder?.servicesUsed ?? [], [detail.data?.workOrder?.servicesUsed]);
+  const otherCharges = useMemo(() => detail.data?.workOrder?.otherCharges ?? [], [detail.data?.workOrder?.otherCharges]);
   const timeLogs = useMemo(() => detail.data?.timeLogs ?? [], [detail.data?.timeLogs]);
   const assigned = useMemo(() => detail.data?.assignedEmployees ?? [], [detail.data?.assignedEmployees]);
   const notes = useMemo(() => wo?.notes ?? [], [wo?.notes]);
@@ -403,7 +489,7 @@ export default function WorkOrderDetailPage() {
     [activeLogs]
   );
 
-  const financials = detail.data?.financials || calculateFinancials(wo, partsUsed);
+  const financials = detail.data?.financials || calculateFinancials(wo, partsUsed, servicesUsed);
   const parseAmount = (val: string) => {
     if (val.trim() === "") return 0;
     const num = Number(val);
@@ -418,12 +504,23 @@ export default function WorkOrderDetailPage() {
     if (!Number.isFinite(parsed) || parsed < 0) return sum;
     return sum + parsed;
   }, 0);
+  const servicesDraft = serviceRows.reduce((sum, row) => {
+    const qty = parseAmount(row.qty || "1");
+    const unitPrice = parseAmount(row.unitPriceAtTime || "0");
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) return sum;
+    return sum + qty * unitPrice;
+  }, 0);
   const partsTotal = Number(financials.partsTotal || 0);
   const taxPlaceholder = 0;
-  const draftSubtotal = laborAmountDraft + partsTotal + otherChargesDraft;
+  const draftSubtotal = laborAmountDraft + partsTotal + servicesDraft + otherChargesDraft;
   const draftGrandTotal = draftSubtotal + taxPlaceholder;
-  const billingLocked = wo?.status !== "Completed";
-  const billingDisabledReason = billingLocked ? "Complete work order first" : undefined;
+  const billingLocked = wo?.status === "Closed";
+  const billingDisabledReason = !canEditBilling
+    ? "Missing billing edit permission."
+    : billingLocked
+    ? "Work order already closed."
+    : undefined;
+  const billingDisabled = billingLocked || !canEditBilling || billingMutation.isPending;
 
   const partTimestamp = (part: WorkOrderPart) =>
     new Date(part.issuedAt || part.updatedAt || part.createdAt || 0).getTime();
@@ -466,20 +563,38 @@ export default function WorkOrderDetailPage() {
       .map((id: string) => {
         const match = (assignableEmployees.data || []).find((e) => e?._id === id);
         if (!match || !match._id) return null;
-        return { employeeId: match._id, roleType: match.role || "TECHNICIAN" };
+        return { employeeId: match._id, roleType: match.role || "SERVICE_ADVISOR" };
       })
       .filter((item): item is { employeeId: string; roleType: string } => Boolean(item));
     assignMutation.mutate({ assignedEmployees: payload });
   };
 
   const addChargeRow = () =>
-    setChargeRows((rows) => [...rows, { name: "", amount: "" }]);
+    setChargeRows((rows) => [...rows, { name: "", amount: "", costAtTime: "" }]);
   const removeChargeRow = (idx: number) =>
     setChargeRows((rows) =>
       rows.length === 1 ? rows : rows.filter((_, i) => i !== idx)
     );
+  const addServiceRow = () =>
+    setServiceRows((rows) => [
+      ...rows,
+      { serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" },
+    ]);
+  const removeServiceRow = (idx: number) =>
+    setServiceRows((rows) =>
+      rows.length === 1 ? rows : rows.filter((_, i) => i !== idx)
+    );
+  const serviceCatalogById = useMemo(() => {
+    const map = new Map<string, ServiceCatalogItem>();
+    (servicesCatalogQuery.data || []).forEach((item) => map.set(item._id, item));
+    return map;
+  }, [servicesCatalogQuery.data]);
 
   const handleBillingSave = () => {
+    if (!canEditBilling) {
+      setBillingError("Missing billing edit permission.");
+      return;
+    }
     if (billingLocked) {
       setBillingError("Complete work order first.");
       return;
@@ -487,33 +602,99 @@ export default function WorkOrderDetailPage() {
     setBillingError("");
     let nextLaborError: string | null = null;
     const nextChargeErrors: Record<number, string> = {};
+    const nextServiceErrors: Record<number, string> = {};
 
     const laborVal = laborInput.trim() === "" ? 0 : Number(laborInput);
     if (!Number.isFinite(laborVal) || laborVal < 0) {
       nextLaborError = "Enter a valid non-negative labor amount.";
     }
 
-    const normalizedCharges: { name: string; amount: number }[] = [];
+    const normalizedCharges: { name: string; amount: number; costAtTime?: number }[] = [];
     chargeRows.forEach((row, idx) => {
-      const hasContent = row.name.trim() !== "" || row.amount.trim() !== "";
+      const hasContent =
+        row.name.trim() !== "" || row.amount.trim() !== "" || row.costAtTime.trim() !== "";
       if (!hasContent) return;
       const amount = Number(row.amount || 0);
+      const costAtTime = Number(row.costAtTime || 0);
       if (!Number.isFinite(amount) || amount < 0) {
         nextChargeErrors[idx] = "Enter a valid non-negative amount.";
         return;
       }
-      normalizedCharges.push({ name: row.name.trim() || "Charge", amount });
+      if (!Number.isFinite(costAtTime) || costAtTime < 0) {
+        nextChargeErrors[idx] = "Enter a valid non-negative cost.";
+        return;
+      }
+      normalizedCharges.push({
+        name: row.name.trim() || "Charge",
+        amount,
+        costAtTime,
+      });
     });
 
-    const hasErrors = Boolean(nextLaborError) || Object.keys(nextChargeErrors).length > 0;
+    const normalizedServices: {
+      serviceId: string;
+      qty: number;
+      unitPriceAtTime?: number;
+      unitCostAtTime?: number;
+      nameAtTime?: string;
+    }[] = [];
+    serviceRows.forEach((row, idx) => {
+      const hasContent =
+        row.serviceId.trim() !== "" ||
+        row.qty.trim() !== "" ||
+        row.unitPriceAtTime.trim() !== "" ||
+        row.unitCostAtTime.trim() !== "" ||
+        row.nameAtTime.trim() !== "";
+      if (!hasContent) return;
+      if (!row.serviceId) {
+        nextServiceErrors[idx] = "Select a service.";
+        return;
+      }
+      const qty = Number(row.qty || "1");
+      if (!Number.isFinite(qty) || qty <= 0) {
+        nextServiceErrors[idx] = "Qty must be greater than zero.";
+        return;
+      }
+      const serviceMeta = serviceCatalogById.get(row.serviceId);
+      const unitPriceRaw =
+        row.unitPriceAtTime.trim() !== ""
+          ? Number(row.unitPriceAtTime)
+          : Number(serviceMeta?.defaultPrice || 0);
+      const unitCostRaw =
+        row.unitCostAtTime.trim() !== ""
+          ? Number(row.unitCostAtTime)
+          : Number(serviceMeta?.defaultCost || 0);
+      if (!Number.isFinite(unitPriceRaw) || unitPriceRaw < 0) {
+        nextServiceErrors[idx] = "Unit price must be a non-negative number.";
+        return;
+      }
+      if (!Number.isFinite(unitCostRaw) || unitCostRaw < 0) {
+        nextServiceErrors[idx] = "Unit cost must be a non-negative number.";
+        return;
+      }
+      normalizedServices.push({
+        serviceId: row.serviceId,
+        qty,
+        unitPriceAtTime: unitPriceRaw,
+        unitCostAtTime: unitCostRaw,
+        nameAtTime: row.nameAtTime.trim() || serviceMeta?.name,
+      });
+    });
+
+    const hasErrors =
+      Boolean(nextLaborError) ||
+      Object.keys(nextChargeErrors).length > 0 ||
+      Object.keys(nextServiceErrors).length > 0;
     setLaborError(nextLaborError);
     setChargeErrors(nextChargeErrors);
+    setServiceErrors(nextServiceErrors);
     if (hasErrors) return;
 
     billingMutation.mutate(
       {
         billableLaborAmount: laborVal,
         otherCharges: normalizedCharges,
+        servicesUsed: normalizedServices,
         paymentMethod,
       },
       {
@@ -551,6 +732,10 @@ export default function WorkOrderDetailPage() {
           <p className="text-muted-foreground text-sm">
             {wo?.complaint || "General service"}
           </p>
+          <div className="text-xs text-muted-foreground space-y-1">
+            <p>Created: {formatDateTime(wo?.createdAt)}</p>
+            <p>Date Out: {wo?.deliveredAt ? formatDateTime(wo.deliveredAt) : "--"}</p>
+          </div>
           {(detail.data?.audit?.createdBy || detail.data?.audit?.billedBy) && (
             <div className="text-xs text-muted-foreground space-y-1">
               {detail.data?.audit?.createdBy && (
@@ -580,7 +765,8 @@ export default function WorkOrderDetailPage() {
             </p>
             <p className="text-[11px] text-muted-foreground">
               Labor Tk. {formatMoney(financials.labor)} | Parts Tk.{" "}
-              {formatMoney(financials.partsTotal)} | Other Tk.{" "}
+              {formatMoney(financials.partsTotal)} | Services Tk.{" "}
+              {formatMoney(financials.servicesTotal)} | Other Tk.{" "}
               {formatMoney(financials.otherTotal)}
             </p>
           </div>
@@ -592,7 +778,14 @@ export default function WorkOrderDetailPage() {
                 return (
                   <button
                     key={s}
-                    onClick={() => statusMutation.mutate(s)}
+                    onClick={() => {
+                      if (s === "Canceled") {
+                        setCancelDialogOpen(true);
+                        setCancelError("");
+                        return;
+                      }
+                      statusMutation.mutate({ status: s });
+                    }}
                     className="text-xs px-2 py-1 rounded bg-muted hover:bg-border disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                     disabled={disabled}
                     title={
@@ -754,39 +947,136 @@ export default function WorkOrderDetailPage() {
                 </select>
               </label>
             </div>
-            <div className="space-y-2">
-              {sortedPartsUsed.map((p) => {
-                const issuedTime = p.issuedAt || p.updatedAt || p.createdAt;
-                return (
-                  <div
-                    key={p.partId}
-                    className="flex items-center justify-between bg-card rounded-lg border border-border px-3 py-2"
-                  >
-                    <div>
-                      <p className="font-semibold text-foreground">
-                        {p.partName || p.partId}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        SKU {p.sku || "--"} | Qty {p.qty}
-                      </p>
-                      {issuedTime && (
-                        <p className="text-[11px] text-muted-foreground">
-                          Issued {formatDateTime(issuedTime)}
-                        </p>
-                      )}
-                    </div>
-                    <div className="text-right text-xs text-muted-foreground">
-                      <p>Selling: Tk. {formatMoney(p.sellingPriceAtTime)}</p>
-                      <p>Cost: Tk. {formatMoney(p.costAtTime)}</p>
-                    </div>
-                  </div>
-                );
-              })}
-              {sortedPartsUsed.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  No parts issued yet.
-                </p>
-              )}
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Part</TH>
+                    <TH>SKU</TH>
+                    <TH>Qty</TH>
+                    <TH>Selling</TH>
+                    <TH>Cost</TH>
+                    <TH>Issued</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {sortedPartsUsed.map((p) => {
+                    const issuedTime = p.issuedAt || p.updatedAt || p.createdAt;
+                    return (
+                      <TR key={p.partId}>
+                        <TD className="font-semibold text-foreground">
+                          {p.partName || p.partId}
+                        </TD>
+                        <TD className="text-muted-foreground">{p.sku || "--"}</TD>
+                        <TD>{p.qty ?? 0}</TD>
+                        <TD>Tk. {formatMoney(p.sellingPriceAtTime)}</TD>
+                        <TD className="text-muted-foreground">
+                          Tk. {formatMoney(p.costAtTime)}
+                        </TD>
+                        <TD className="text-muted-foreground">
+                          {issuedTime ? formatDateTime(issuedTime) : "--"}
+                        </TD>
+                      </TR>
+                    );
+                  })}
+                  {sortedPartsUsed.length === 0 && (
+                    <TR>
+                      <TD colSpan={6} className="text-center text-muted-foreground">
+                        No parts issued yet.
+                      </TD>
+                    </TR>
+                  )}
+                </TBody>
+              </Table>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="font-semibold text-foreground">Services Used</p>
+            </div>
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Service</TH>
+                    <TH>Qty</TH>
+                    <TH>Unit Price</TH>
+                    <TH>Unit Cost</TH>
+                    <TH>Total</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {servicesUsed.map((service, index) => {
+                    const qty = toNumeric(service.qty);
+                    const unitPrice = toNumeric(service.unitPriceAtTime);
+                    const total = qty * unitPrice;
+                    return (
+                      <TR key={index}>
+                        <TD className="font-semibold text-foreground">
+                          {service.nameAtTime || service.serviceId}
+                        </TD>
+                        <TD>{qty}</TD>
+                        <TD>Tk. {formatMoney(unitPrice)}</TD>
+                        <TD className="text-muted-foreground">
+                          Tk. {formatMoney(service.unitCostAtTime)}
+                        </TD>
+                        <TD>Tk. {formatMoney(total)}</TD>
+                      </TR>
+                    );
+                  })}
+                  {servicesUsed.length === 0 && (
+                    <TR>
+                      <TD colSpan={5} className="text-center text-muted-foreground">
+                        No service lines yet.
+                      </TD>
+                    </TR>
+                  )}
+                </TBody>
+              </Table>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="font-semibold text-foreground">Other Charges</p>
+            </div>
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Label</TH>
+                    <TH>Selling</TH>
+                    <TH>Cost</TH>
+                    <TH>Margin</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {otherCharges.map((charge, index) => {
+                    const amount = toNumeric(charge?.amount);
+                    const cost = toNumeric(charge?.costAtTime);
+                    return (
+                      <TR key={index}>
+                        <TD className="font-semibold text-foreground">
+                          {charge?.name || "Charge"}
+                        </TD>
+                        <TD>Tk. {formatMoney(amount)}</TD>
+                        <TD className="text-muted-foreground">
+                          Tk. {formatMoney(cost)}
+                        </TD>
+                        <TD>Tk. {formatMoney(amount - cost)}</TD>
+                      </TR>
+                    );
+                  })}
+                  {otherCharges.length === 0 && (
+                    <TR>
+                      <TD colSpan={4} className="text-center text-muted-foreground">
+                        No other charge lines yet.
+                      </TD>
+                    </TR>
+                  )}
+                </TBody>
+              </Table>
             </div>
           </div>
 
@@ -863,42 +1153,53 @@ export default function WorkOrderDetailPage() {
               )}
             </div>
             <div className="space-y-2">
-              {sortedTimeLogs.map((l) => {
-                const isRunning = !l.clockOutAt;
-                const duration = computeDurationMinutes(l);
-                const started = formatDateTime(l.clockInAt);
-                const ended = l.clockOutAt ? formatDateTime(l.clockOutAt) : "In progress";
-                const actor = formatEmployeeName(l);
-                return (
-                  <div
-                    key={l._id}
-                    className="bg-card rounded-lg border border-border px-3 py-2 text-xs space-y-1"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-foreground">
-                        <p className="font-semibold">{actor}</p>
-                        <p className="text-[11px] text-muted-foreground">
-                          {started} {"->"} {ended}
-                        </p>
-                      </div>
-                      <div className="text-right text-muted-foreground flex items-center gap-2">
-                        <span>Duration: {duration} min</span>
-                        {isRunning && (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-green-500/40 bg-green-500/10 px-2 py-0.5 text-[11px] text-green-200">
-                            <Clock4 className="h-3 w-3" aria-hidden />
-                            Running
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {sortedTimeLogs.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  No time logs yet.
-                </p>
-              )}
+              <div className="overflow-x-auto">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Employee</TH>
+                      <TH>Clock in</TH>
+                      <TH>Clock out</TH>
+                      <TH>Duration</TH>
+                      <TH>Status</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {sortedTimeLogs.map((l) => {
+                      const isRunning = !l.clockOutAt;
+                      const duration = computeDurationMinutes(l);
+                      const started = formatDateTime(l.clockInAt);
+                      const ended = l.clockOutAt ? formatDateTime(l.clockOutAt) : "In progress";
+                      const actor = formatEmployeeName(l);
+                      return (
+                        <TR key={l._id}>
+                          <TD className="font-semibold text-foreground">{actor}</TD>
+                          <TD className="text-muted-foreground">{started}</TD>
+                          <TD className="text-muted-foreground">{ended}</TD>
+                          <TD>{duration} min</TD>
+                          <TD>
+                            {isRunning ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-green-500/40 bg-green-500/10 px-2 py-0.5 text-[11px] text-green-200">
+                                <Clock4 className="h-3 w-3" aria-hidden />
+                                Running
+                              </span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">Stopped</span>
+                            )}
+                          </TD>
+                        </TR>
+                      );
+                    })}
+                    {sortedTimeLogs.length === 0 && (
+                      <TR>
+                        <TD colSpan={5} className="text-center text-muted-foreground">
+                          No time logs yet.
+                        </TD>
+                      </TR>
+                    )}
+                  </TBody>
+                </Table>
+              </div>
             </div>
           </div>
 
@@ -917,21 +1218,30 @@ export default function WorkOrderDetailPage() {
                 </select>
               </label>
             </div>
-            <div className="space-y-2">
-              {sortedNotes.map((n, idx) => (
-                <div
-                  key={idx}
-                  className="bg-card rounded-lg border border-border px-3 py-2 text-sm text-foreground"
-                >
-                  <p>{n.message}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {formatDateTime(n.createdAt)}
-                  </p>
-                </div>
-              ))}
-              {sortedNotes.length === 0 && (
-                <p className="text-sm text-muted-foreground">No notes yet.</p>
-              )}
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Note</TH>
+                    <TH>Created</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {sortedNotes.map((n, idx) => (
+                    <TR key={idx}>
+                      <TD className="text-foreground">{n.message}</TD>
+                      <TD className="text-muted-foreground">{formatDateTime(n.createdAt)}</TD>
+                    </TR>
+                  ))}
+                  {sortedNotes.length === 0 && (
+                    <TR>
+                      <TD colSpan={2} className="text-center text-muted-foreground">
+                        No notes yet.
+                      </TD>
+                    </TR>
+                  )}
+                </TBody>
+              </Table>
             </div>
             <div className="mt-2 flex gap-2">
               <input
@@ -963,68 +1273,8 @@ export default function WorkOrderDetailPage() {
         </div>
 
         <div className="space-y-4">
-          {/* TECHNICIAN/PAINTER VIEW: Only show Clock In/Out and Issue Parts */}
-          {isTechOrPainter && (
-            <div className="glass p-4 rounded-xl space-y-3">
-              <p className="font-semibold text-foreground text-center">
-                Technician Dashboard
-              </p>
-              <div className="flex flex-col gap-2">
-                <div>
-                  <p className="text-xs text-muted-foreground mb-2">
-                    Time tracking
-                  </p>
-                  <div className="flex gap-2">
-                    {!myActiveLog ? (
-                      <button
-                        onClick={() => clockIn.mutate()}
-                        className="flex-1 px-3 py-2 rounded bg-primary hover:bg-primary/80 text-foreground font-semibold disabled:opacity-60"
-                        disabled={clockIn.isPending || !!myActiveLog || !perms.canCreateLogs}
-                        title={
-                          !perms.canCreateLogs
-                            ? "You do not have permission to clock in."
-                            : myActiveLog
-                              ? "Already clocked in."
-                              : undefined
-                        }
-                      >
-                        {clockIn.isPending ? "Clocking in..." : "Clock In"}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => clockOut.mutate()}
-                        className="flex-1 px-3 py-2 rounded bg-green-600 hover:bg-green-700 text-foreground font-semibold disabled:opacity-60"
-                        disabled={clockOut.isPending || !perms.canCreateLogs}
-                        title={
-                          !perms.canCreateLogs
-                            ? "You do not have permission to clock out."
-                            : undefined
-                        }
-                      >
-                        {clockOut.isPending ? "Clocking out..." : "Clock Out"}
-                      </button>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground mt-1">
-                    Total time: {(totalMinutes / 60).toFixed(1)}h ({totalMinutes} min) -{" "}
-                    {effectiveLogFilter === "all" ? "All users" : "Your logs"}
-                    {activeLogs.length > 0 && (
-                      <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2 py-0.5 text-[11px] text-green-200">
-                        Running {runningMinutesAll} min
-                      </span>
-                    )}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-2">Status</p>
-                  <StatusBadge status={wo?.status} />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* SERVICE ADVISOR VIEW: Show full billing and payment section */}
-          {!isTechOrPainter && (
+          {/* Billing view */}
+          {
             <div className="glass p-4 rounded-xl space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-foreground">
@@ -1035,16 +1285,14 @@ export default function WorkOrderDetailPage() {
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                {wo?.status === "Completed"
-                  ? "Submit billing to close the work order and invoice."
-                  : "Complete the work order first to enable billing submission."}
+                Submit billing to close the work order and invoice.
               </p>
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">Payment method</p>
                 <select
                   value={paymentMethod}
                   onChange={(e) => setPaymentMethod(e.target.value)}
-                  disabled={billingLocked || billingMutation.isPending}
+                  disabled={billingDisabled}
                   title={billingDisabledReason}
                   className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 >
@@ -1066,10 +1314,147 @@ export default function WorkOrderDetailPage() {
                   placeholder="0"
                   allowEmpty
                   min={0}
-                  disabled={billingLocked || billingMutation.isPending}
+                  disabled={billingDisabled}
                   title={billingDisabledReason}
                 />
                 {laborError && <p className="text-[11px] text-red-400">{laborError}</p>}
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-foreground">Services</p>
+                  <button
+                    type="button"
+                    onClick={addServiceRow}
+                    disabled={billingDisabled || !perms.canReadServices}
+                    title={billingDisabledReason}
+                    className="text-xs text-accent underline disabled:opacity-50"
+                  >
+                    Add service
+                  </button>
+                </div>
+                {!perms.canReadServices && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Missing service catalog read permission.
+                  </p>
+                )}
+                {serviceRows.map((row, idx) => {
+                  const rowLineTotal =
+                    (Number(row.qty || "0") || 0) * (Number(row.unitPriceAtTime || "0") || 0);
+                  return (
+                    <div key={idx} className="grid grid-cols-12 gap-2 items-start">
+                      <select
+                        value={row.serviceId}
+                        onChange={(e) => {
+                          const serviceId = e.target.value;
+                          const service = serviceCatalogById.get(serviceId);
+                          setServiceRows((rows) =>
+                            rows.map((r, i) =>
+                              i === idx
+                                ? {
+                                    ...r,
+                                    serviceId,
+                                    nameAtTime: service?.name || r.nameAtTime,
+                                    unitPriceAtTime:
+                                      service && r.unitPriceAtTime.trim() === ""
+                                        ? String(service.defaultPrice ?? 0)
+                                        : r.unitPriceAtTime,
+                                    unitCostAtTime:
+                                      service && r.unitCostAtTime.trim() === ""
+                                        ? String(service.defaultCost ?? 0)
+                                        : r.unitCostAtTime,
+                                  }
+                                : r
+                            )
+                          );
+                          setServiceErrors((prev) => {
+                            const next = { ...prev };
+                            delete next[idx];
+                            return next;
+                          });
+                        }}
+                        disabled={billingDisabled || !perms.canReadServices}
+                        className="col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                        title={billingDisabledReason}
+                      >
+                        <option value="">Select service</option>
+                        {(servicesCatalogQuery.data || []).map((service) => (
+                          <option key={service._id} value={service._id}>
+                            {service.name} ({service.code})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        value={row.qty}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setServiceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, qty: value } : r)));
+                          setServiceErrors((prev) => {
+                            const next = { ...prev };
+                            delete next[idx];
+                            return next;
+                          });
+                        }}
+                        placeholder="Qty"
+                        className="col-span-1 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                        disabled={billingDisabled}
+                        title={billingDisabledReason}
+                      />
+                      <CurrencyInput
+                        value={row.unitPriceAtTime}
+                        onChange={(val) => {
+                          setServiceRows((rows) =>
+                            rows.map((r, i) => (i === idx ? { ...r, unitPriceAtTime: val } : r))
+                          );
+                          setServiceErrors((prev) => {
+                            const next = { ...prev };
+                            delete next[idx];
+                            return next;
+                          });
+                        }}
+                        placeholder="Unit price"
+                        allowEmpty
+                        min={0}
+                        disabled={billingDisabled}
+                        title={billingDisabledReason}
+                        className="col-span-2"
+                      />
+                      <CurrencyInput
+                        value={row.unitCostAtTime}
+                        onChange={(val) => {
+                          setServiceRows((rows) =>
+                            rows.map((r, i) => (i === idx ? { ...r, unitCostAtTime: val } : r))
+                          );
+                          setServiceErrors((prev) => {
+                            const next = { ...prev };
+                            delete next[idx];
+                            return next;
+                          });
+                        }}
+                        placeholder="Unit cost"
+                        allowEmpty
+                        min={0}
+                        disabled={billingDisabled}
+                        title={billingDisabledReason}
+                        className="col-span-2"
+                      />
+                      <div className="col-span-2 text-[11px] text-muted-foreground text-right">
+                        Line Tk. {formatMoney(rowLineTotal)}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeServiceRow(idx)}
+                        disabled={serviceRows.length === 1 || billingDisabled}
+                        title={billingDisabledReason}
+                        className="col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                      >
+                        Remove
+                      </button>
+                      {serviceErrors[idx] && (
+                        <p className="col-span-12 text-[11px] text-red-400">{serviceErrors[idx]}</p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -1079,7 +1464,7 @@ export default function WorkOrderDetailPage() {
                   <button
                     type="button"
                     onClick={addChargeRow}
-                    disabled={billingLocked || billingMutation.isPending}
+                    disabled={billingDisabled}
                     title={billingDisabledReason}
                     className="text-xs text-accent underline"
                   >
@@ -1088,8 +1473,8 @@ export default function WorkOrderDetailPage() {
                 </div>
                 {chargeRows.map((row, idx) => (
                   <div
-                    key={`${idx}-${row.name}`}
-                    className="grid grid-cols-8 gap-2 items-center"
+                    key={idx}
+                    className="grid grid-cols-12 gap-2 items-center"
                   >
                     <input
                       value={row.name}
@@ -1101,9 +1486,9 @@ export default function WorkOrderDetailPage() {
                           )
                         );
                       }}
-                      placeholder="Shop supplies"
-                      className="col-span-3 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
-                      disabled={billingLocked || billingMutation.isPending}
+                      placeholder="Label (e.g., Fuel line service)"
+                      className="col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                      disabled={billingDisabled}
                       title={billingDisabledReason}
                     />
                     <div className="col-span-3">
@@ -1124,22 +1509,44 @@ export default function WorkOrderDetailPage() {
                         placeholder="0"
                         allowEmpty
                         min={0}
-                        disabled={billingLocked || billingMutation.isPending}
+                        disabled={billingDisabled}
                         title={billingDisabledReason}
                       />
                       {chargeErrors[idx] && (
                         <p className="text-[11px] text-red-400 mt-1">{chargeErrors[idx]}</p>
                       )}
                     </div>
-                    <div className="text-[11px] text-muted-foreground text-right">
-                      Line total Tk. {formatMoney(parseAmount(row.amount))}
+                    <div className="col-span-3">
+                      <CurrencyInput
+                        value={row.costAtTime}
+                        onChange={(val) => {
+                          setChargeRows((rows) =>
+                            rows.map((r, i) =>
+                              i === idx ? { ...r, costAtTime: val } : r
+                            )
+                          );
+                          setChargeErrors((prev) => {
+                            const next = { ...prev };
+                            delete next[idx];
+                            return next;
+                          });
+                        }}
+                        placeholder="Cost"
+                        allowEmpty
+                        min={0}
+                        disabled={billingDisabled}
+                        title={billingDisabledReason}
+                      />
+                    </div>
+                    <div className="col-span-1 text-[11px] text-muted-foreground text-right">
+                      Tk. {formatMoney(parseAmount(row.amount))}
                     </div>
                     <button
                       type="button"
                       onClick={() => removeChargeRow(idx)}
-                      disabled={chargeRows.length === 1 || billingLocked || billingMutation.isPending}
+                      disabled={chargeRows.length === 1 || billingDisabled}
                       title={billingDisabledReason}
-                      className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                      className="col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
                     >
                       Remove
                     </button>
@@ -1152,6 +1559,7 @@ export default function WorkOrderDetailPage() {
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-1">
                 <p>Labor Tk. {formatMoney(laborAmountDraft)}</p>
                 <p>Parts Tk. {formatMoney(partsTotal)}</p>
+                <p>Services Tk. {formatMoney(servicesDraft)}</p>
                 <p>Other Tk. {formatMoney(otherChargesDraft)}</p>
                 <p>Tax (placeholder) Tk. {formatMoney(taxPlaceholder)}</p>
                 <p className="text-foreground font-semibold">
@@ -1160,19 +1568,24 @@ export default function WorkOrderDetailPage() {
               </div>
               <button
                 onClick={handleBillingSave}
-                disabled={billingMutation.isPending || billingLocked}
+                disabled={billingDisabled}
                 title={billingDisabledReason}
                 className="w-full py-2 rounded-lg bg-muted font-semibold text-foreground disabled:opacity-50 hover:bg-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
               >
                 {billingMutation.isPending
-                  ? wo?.status === "Completed"
-                    ? "Submitting..."
-                    : "Saving..."
+                  ? "Submitting..."
+                  : wo?.status === "Closed"
+                  ? "Save billing changes"
                   : "Submit billing & close"}
               </button>
               {billingLocked && (
                 <p className="text-[11px] text-muted-foreground">
-                  Complete the work order to enable billing submission.
+                  Work order is already closed.
+                </p>
+              )}
+              {!canEditBilling && (
+                <p className="text-[11px] text-muted-foreground">
+                  Missing billing edit permission.
                 </p>
               )}
               {wo?.status === "Closed" && (
@@ -1181,9 +1594,9 @@ export default function WorkOrderDetailPage() {
                 </div>
               )}
             </div>
-          )}
+          }
 
-          {perms.canAssign && !isTechOrPainter && (
+          {perms.canAssign && (
             <div className="glass p-4 rounded-xl space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-foreground">Assignments</p>
@@ -1194,7 +1607,7 @@ export default function WorkOrderDetailPage() {
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Choose technicians or painters for this job.
+                Choose assignees for this job.
               </p>
               {assignableEmployees.isLoading && (
                 <p className="text-sm text-muted-foreground">Loading team...</p>
@@ -1245,7 +1658,7 @@ export default function WorkOrderDetailPage() {
             </div>
           )}
 
-          {!isTechOrPainter && (
+          {
             <div className="glass p-4 rounded-xl space-y-3">
               <div className="flex items-center justify-between">
                 <p className="font-semibold text-foreground">Issue Part</p>
@@ -1312,7 +1725,7 @@ export default function WorkOrderDetailPage() {
                 {issueMutation.isPending ? "Issuing..." : "Issue to WO"}
               </button>
             </div>
-          )}
+          }
 
           <div className="glass p-4 rounded-xl space-y-3">
             <p className="font-semibold text-foreground">Tech View</p>
@@ -1334,6 +1747,67 @@ export default function WorkOrderDetailPage() {
           </div>
         </div>
       </div>
+      <Dialog
+        open={cancelDialogOpen}
+        onClose={() => {
+          setCancelDialogOpen(false);
+          setCancelNote("");
+          setCancelError("");
+        }}
+        title="Cancel work order"
+        footer={
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-2 rounded-md border border-border text-sm"
+              onClick={() => {
+                setCancelDialogOpen(false);
+                setCancelNote("");
+                setCancelError("");
+              }}
+            >
+              Keep open
+            </button>
+            <button
+              className="px-3 py-2 rounded-md bg-primary text-sm font-semibold text-foreground disabled:opacity-60"
+              disabled={statusMutation.isPending}
+              onClick={() => {
+                const message = cancelNote.trim();
+                if (!message) {
+                  setCancelError("Cancellation note is required.");
+                  return;
+                }
+                statusMutation.mutate(
+                  { status: "Canceled", note: message },
+                  {
+                    onSuccess: () => {
+                      setCancelDialogOpen(false);
+                      setCancelNote("");
+                      setCancelError("");
+                    }
+                  }
+                );
+              }}
+            >
+              {statusMutation.isPending ? "Canceling..." : "Confirm cancel"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            A cancellation note is required. Any issued parts will be returned to inventory.
+          </p>
+          <Textarea
+            value={cancelNote}
+            onChange={(e) => {
+              setCancelNote(e.target.value);
+              setCancelError("");
+            }}
+            placeholder="Why was this work order canceled?"
+          />
+          {cancelError && <p className="text-xs text-red-400">{cancelError}</p>}
+        </div>
+      </Dialog>
     </Shell>
   );
 }

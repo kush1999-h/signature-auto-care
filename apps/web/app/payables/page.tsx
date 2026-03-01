@@ -145,10 +145,9 @@ export default function PayablesPage() {
     mutationFn: async (payableId: string) => api.patch(`/payables/${payableId}`, { status: "PAID" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["payables"] });
-      qc.invalidateQueries({ queryKey: ["expenses"] });
       toast.show({
         title: "Payable marked as paid",
-        description: "Expense recorded and payables updated.",
+        description: "Payable updated successfully.",
         variant: "success"
       });
     },
@@ -266,7 +265,7 @@ export default function PayablesPage() {
                           onClick={() => {
                             openConfirm({
                               title: "Mark payable as paid?",
-                              description: "This will create a cash expense and close the payable.",
+                              description: "This will mark the payable as paid.",
                               confirmText: "Mark paid",
                               onConfirm: () => payablesUpdate.mutate(p._id)
                             });

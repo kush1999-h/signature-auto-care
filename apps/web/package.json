@@ -10,9 +10,7 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"**/*.{ts,tsx,js,css,json}\""
   },
-  "overrides": {
-    "eslint": "8.57.1"
-  },
+  "overrides": {},
   "dependencies": {
     "@hookform/resolvers": "^3.3.0",
     "@tanstack/react-query": "^5.14.0",

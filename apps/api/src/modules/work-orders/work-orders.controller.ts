@@ -21,8 +21,19 @@ import { PermissionsAny } from "../../common/decorators/permissions-any.decorato
 import { Public } from "../../common/decorators/public.decorator";
 import type { WorkOrder } from "../../schemas";
 
-type StatusBody = { status?: string };
-type BillingBody = { billableLaborAmount?: number; otherCharges?: { name: string; amount: number }[]; paymentMethod?: string };
+type StatusBody = { status?: string; note?: string };
+type BillingBody = {
+  billableLaborAmount?: number;
+  otherCharges?: { name: string; amount: number; costAtTime?: number }[];
+  servicesUsed?: {
+    serviceId: string;
+    qty?: number;
+    unitPriceAtTime?: number;
+    unitCostAtTime?: number;
+    nameAtTime?: string;
+  }[];
+  paymentMethod?: string;
+};
 type PaymentBody = { method?: string; amount?: number | string };
 type AssignBody = { assignedEmployees: { employeeId: string; roleType?: string }[] };
 type IssuePartBody = { partId: string; qty: number | string };
@@ -89,11 +100,11 @@ export class WorkOrdersController {
     if (!body.status) {
       throw new BadRequestException("status is required");
     }
-    return this.workOrders.updateStatus(id, body.status, user);
+    return this.workOrders.updateStatus(id, body.status, user, body.note);
   }
 
   @Patch("work-orders/:id/billing")
-  @PermissionsRequired(Permissions.WORKORDERS_UPDATE_STATUS)
+  @PermissionsRequired(Permissions.WORKORDERS_BILLING_EDIT)
   async updateBilling(
     @Param("id") id: string,
     @Body() body: BillingBody,
@@ -104,6 +115,7 @@ export class WorkOrdersController {
       {
         billableLaborAmount: body.billableLaborAmount,
         otherCharges: body.otherCharges,
+        servicesUsed: body.servicesUsed,
         paymentMethod: body.paymentMethod,
       },
       user
@@ -136,7 +148,7 @@ export class WorkOrdersController {
   ) {
     const employees = (body.assignedEmployees || []).map((emp) => ({
       employeeId: emp.employeeId,
-      roleType: emp.roleType || "TECHNICIAN"
+      roleType: emp.roleType || "SERVICE_ADVISOR"
     }));
     return this.workOrders.assign(id, employees, resolveUserId(user));
   }
@@ -151,18 +163,7 @@ export class WorkOrdersController {
   ) {
     const wo = await this.workOrders.findById(id);
     if (!wo) throw new ForbiddenException("Work order not found");
-    const assignedIds =
-      wo.assignedEmployees?.map((a) => normalizeId(a.employeeId)) || [];
-    const isTechOrPainter = user.role && ["TECHNICIAN", "PAINTER"].includes(user.role);
-    if (isTechOrPainter) {
-      throw new ForbiddenException("Technicians and painters cannot issue parts");
-    }
     const normalizedUserId = resolveUserId(user);
-
-    // Technicians/painters must be assigned to issue parts for the work order
-    if (isTechOrPainter && !assignedIds.includes(normalizedUserId)) {
-      throw new ForbiddenException("You must be assigned to this work order to issue parts");
-    }
     return this.workOrders.issuePart({
       workOrderId: id,
       partId: body.partId,

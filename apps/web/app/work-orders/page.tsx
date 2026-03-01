@@ -11,8 +11,10 @@ import { SegmentedControl } from "../../components/ui/segmented-control";
 import { EmptyState } from "../../components/ui/empty-state";
 import { ErrorState } from "../../components/ui/error-state";
 import { Skeleton } from "../../components/ui/skeleton";
+import { Dialog } from "../../components/ui/dialog";
+import { Textarea } from "../../components/ui/textarea";
 
-const statuses = ["Scheduled", "In Progress", "Waiting Parts", "Completed", "Closed"];
+const statuses = ["Scheduled", "In Progress", "Closed", "Canceled"];
 
 type WorkOrder = {
   _id: string;
@@ -20,8 +22,10 @@ type WorkOrder = {
   status?: string;
   vehicleId?: string;
   createdAt?: string;
+  deliveredAt?: string | null;
   billableLaborAmount?: number;
   partsUsed?: { sellingPriceAtTime?: number; qty?: number }[];
+  servicesUsed?: { unitPriceAtTime?: number; qty?: number }[];
   otherCharges?: { amount?: number }[];
   assignedEmployees?: { employeeId?: string }[];
 };
@@ -42,14 +46,21 @@ const formatMoney = (val: number | string | null | undefined) => {
 const summarizeWorkOrder = (wo: WorkOrder) => {
   const labor = Number(wo.billableLaborAmount || 0);
   const partsTotal = (wo.partsUsed || []).reduce((sum, part) => sum + Number(part.sellingPriceAtTime || 0) * (part.qty || 0), 0);
+  const servicesTotal = (wo.servicesUsed || []).reduce(
+    (sum, service) => sum + Number(service.unitPriceAtTime || 0) * (service.qty || 0),
+    0
+  );
   const otherTotal = (wo.otherCharges || []).reduce((sum, charge) => sum + Number(charge?.amount || 0), 0);
   return {
     labor,
     partsTotal,
+    servicesTotal,
     otherTotal,
-    total: labor + partsTotal + otherTotal,
+    total: labor + partsTotal + servicesTotal + otherTotal,
   };
 };
+
+const getDateOut = (wo: WorkOrder) => wo.deliveredAt || wo.createdAt || "";
 
 export default function WorkOrdersPage() {
   const { session } = useAuth();
@@ -61,21 +72,19 @@ export default function WorkOrdersPage() {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [page, setPage] = useState(1);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [cancelTargetId, setCancelTargetId] = useState<string | null>(null);
+  const [cancelNote, setCancelNote] = useState("");
+  const [cancelError, setCancelError] = useState("");
   const pageSize = 12;
 
-  const role = session?.user?.role;
   const rawUserId = session?.user?.userId || (session?.user as { _id?: string } | undefined)?._id;
   const userId = useMemo(() => normalizeId(rawUserId), [rawUserId]);
   const canReadAll = session?.user?.permissions?.includes("WORKORDERS_READ_ALL");
   const canReadAssigned = session?.user?.permissions?.includes("WORKORDERS_READ_ASSIGNED");
   const canUpdateStatus = session?.user?.permissions?.includes("WORKORDERS_UPDATE_STATUS");
-  const isTechOrPainter = role === "TECHNICIAN" || role === "PAINTER";
-  const filterStatuses = isTechOrPainter
-    ? ["Scheduled", "In Progress", "Waiting Parts"]
-    : statuses;
-  const updateStatuses = isTechOrPainter
-    ? ["In Progress", "Waiting Parts", "Completed"]
-    : statuses;
+  const filterStatuses = statuses;
+  const updateStatuses = statuses;
   const showBoard = canReadAll || canReadAssigned;
 
   const workOrders = useQuery({
@@ -90,9 +99,10 @@ export default function WorkOrdersPage() {
   });
 
   const updateStatus = useMutation({
-    mutationFn: (payload: { id: string; status: string }) =>
+    mutationFn: (payload: { id: string; status: string; note?: string }) =>
       api.patch(`/work-orders/${payload.id}/status`, {
         status: payload.status,
+        note: payload.note
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["work-orders"] }),
   });
@@ -123,13 +133,13 @@ export default function WorkOrdersPage() {
         : bySearch;
 
     const byDate = byAssigned.filter((wo) => {
-      if (!wo.createdAt || (!start && !end)) return true;
-      const created = new Date(wo.createdAt);
-      if (start && created < start) return false;
+      if ((!wo.deliveredAt && !wo.createdAt) || (!start && !end)) return true;
+      const dateOut = new Date(getDateOut(wo));
+      if (start && dateOut < start) return false;
       if (end) {
         const endOfDay = new Date(end);
         endOfDay.setHours(23, 59, 59, 999);
-        if (created > endOfDay) return false;
+        if (dateOut > endOfDay) return false;
       }
       return true;
     });
@@ -142,10 +152,10 @@ export default function WorkOrdersPage() {
         return (a.status || "").localeCompare(b.status || "");
       }
       if (sortBy === "oldest") {
-        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+        return new Date(getDateOut(a) || 0).getTime() - new Date(getDateOut(b) || 0).getTime();
       }
       // recent default
-      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+      return new Date(getDateOut(b) || 0).getTime() - new Date(getDateOut(a) || 0).getTime();
     });
 
     return sorted;
@@ -294,17 +304,21 @@ export default function WorkOrdersPage() {
                               Created {new Date(wo.createdAt).toLocaleDateString()}
                             </p>
                           )}
+                          <p className="text-[11px] text-muted-foreground">
+                            Date Out {wo.deliveredAt ? new Date(wo.deliveredAt).toLocaleDateString() : "--"}
+                          </p>
                         </div>
                         <div className="text-right space-y-1">
                           <span className="text-[11px] px-2 py-1 rounded bg-white/10 inline-block">{wo.status}</span>
                           <p className="text-lg font-semibold text-foreground">Tk. {formatMoney(summary.total)}</p>
                           <p className="text-[11px] text-muted-foreground">
-                            Parts Tk. {formatMoney(summary.partsTotal)} | Labor Tk. {formatMoney(summary.labor)}
+                            Parts Tk. {formatMoney(summary.partsTotal)} | Services Tk. {formatMoney(summary.servicesTotal)} | Labor Tk. {formatMoney(summary.labor)}
                           </p>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                         <span className="rounded-full border border-border px-2 py-1">Parts {wo.partsUsed?.length || 0}</span>
+                        <span className="rounded-full border border-border px-2 py-1">Services {wo.servicesUsed?.length || 0}</span>
                         <span className="rounded-full border border-border px-2 py-1">
                           Other Tk. {formatMoney(summary.otherTotal)}
                         </span>
@@ -321,7 +335,15 @@ export default function WorkOrdersPage() {
                           <button
                             key={s}
                             disabled={!canUpdateStatus || updateStatus.isPending}
-                            onClick={() => updateStatus.mutate({ id: wo._id, status: s })}
+                            onClick={() => {
+                              if (s === "Canceled") {
+                                setCancelTargetId(wo._id);
+                                setCancelDialogOpen(true);
+                                setCancelError("");
+                                return;
+                              }
+                              updateStatus.mutate({ id: wo._id, status: s });
+                            }}
                             className={clsx(
                               "px-2 py-1 rounded text-[11px] disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
                               wo.status === s ? "bg-brand.red/80 text-white" : "bg-white/10 hover:bg-white/15"
@@ -362,6 +384,71 @@ export default function WorkOrdersPage() {
           )}
         </>
       )}
+      <Dialog
+        open={cancelDialogOpen}
+        onClose={() => {
+          setCancelDialogOpen(false);
+          setCancelTargetId(null);
+          setCancelNote("");
+          setCancelError("");
+        }}
+        title="Cancel work order"
+        footer={
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-2 rounded-md border border-border text-sm"
+              onClick={() => {
+                setCancelDialogOpen(false);
+                setCancelTargetId(null);
+                setCancelNote("");
+                setCancelError("");
+              }}
+            >
+              Keep open
+            </button>
+            <button
+              className="px-3 py-2 rounded-md bg-primary text-sm font-semibold text-foreground disabled:opacity-60"
+              disabled={updateStatus.isPending}
+              onClick={() => {
+                const message = cancelNote.trim();
+                if (!message) {
+                  setCancelError("Cancellation note is required.");
+                  return;
+                }
+                if (!cancelTargetId) return;
+                updateStatus.mutate(
+                  { id: cancelTargetId, status: "Canceled", note: message },
+                  {
+                    onSuccess: () => {
+                      setCancelDialogOpen(false);
+                      setCancelTargetId(null);
+                      setCancelNote("");
+                      setCancelError("");
+                    }
+                  }
+                );
+              }}
+            >
+              {updateStatus.isPending ? "Canceling..." : "Confirm cancel"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            A cancellation note is required. Any issued parts will be returned to inventory.
+          </p>
+          <Textarea
+            value={cancelNote}
+            onChange={(e) => {
+              setCancelNote(e.target.value);
+              setCancelError("");
+            }}
+            placeholder="Why was this work order canceled?"
+          />
+          {cancelError && <p className="text-xs text-red-400">{cancelError}</p>}
+        </div>
+      </Dialog>
     </Shell>
   );
 }

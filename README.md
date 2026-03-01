@@ -28,6 +28,7 @@ cp apps/py/.env.example apps/py/.env
 Required by service:
 
 API (apps/api):
+
 - MONGO_URI
 - MONGO_DB
 - JWT_SECRET
@@ -39,10 +40,12 @@ API (apps/api):
 - PORT
 
 Web (apps/web):
+
 - NEXT_PUBLIC_API_URL
 - NEXT_PUBLIC_PDF_URL
 
 PDF (apps/py):
+
 - JWT_SECRET
 - API_URL
 - CORS_ORIGINS
@@ -109,37 +112,107 @@ python -m uvicorn main:app --reload --port 8001
 ## Production deployment (Render + Vercel)
 
 API (Render, Docker):
+
 - Dockerfile: `apps/api/Dockerfile`
 - Port: 3001
 - Set API env vars listed above
 
 PDF service (Render, Docker):
+
 - Dockerfile: `apps/py/Dockerfile`
 - Port: 8001
 - Set PDF env vars listed above
 
 Web (Vercel):
+
 - Root directory: `apps/web`
 - Set `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_PDF_URL` before deploy
 
 ## Production deployment (EC2 + Docker + GitHub Actions)
 
 Prereqs on EC2:
+
 - Docker + Docker Compose installed
 - Repo path: `/home/ec2-user/signature-auto-care`
 - Environment files created in `apps/api/.env`, `apps/web/.env`, `apps/py/.env`
 - (Optional) Nginx reverse proxy for ports 80/443
 
 GitHub Actions:
+
 - Workflow file: `.github/workflows/deploy-ec2.yml`
 - Required secrets:
   - `EC2_HOST`
   - `EC2_USER`
   - `EC2_SSH_KEY`
   - `EC2_PORT` (optional, default 22)
+- Deploy behavior: the workflow pulls the latest code and runs `docker compose up -d` without rebuilding images.
+  Rebuild only when code or dependencies change: `docker compose up -d --build`.
 
 HTTPS note:
+
 - Let's Encrypt requires a domain name. If you do not have a domain yet, deploy HTTP first and add HTTPS later.
+
+## EC2 command cheat sheet
+
+Basics:
+
+- `cd /home/ec2-user/signature-auto-care`
+- `git pull`
+
+Build/run:
+
+- `COMPOSE_BAKE=false docker compose build`
+- `docker compose up -d`
+- `docker compose down`
+
+Rebuild only web:
+
+- `COMPOSE_BAKE=false docker compose build web`
+- `docker compose up -d web`
+
+Restart services:
+
+- `docker compose restart api`
+- `docker compose restart web`
+- `docker compose restart py`
+
+Logs:
+
+- `docker compose logs --tail=100 api`
+- `docker compose logs --tail=100 web`
+- `docker compose logs --tail=100 py`
+
+Status:
+
+- `docker compose ps`
+- `docker images`
+
+Disk cleanup:
+
+- `docker system df`
+- `docker image prune -af`
+- `docker builder prune -af`
+- `docker buildx prune -af`
+- `docker system prune -af`
+- `docker volume prune -f`
+
+Env files:
+
+- `nano apps/api/.env`
+- `nano apps/web/.env`
+- `nano apps/py/.env`
+
+Nginx/HTTPS:
+
+- `sudo nginx -t`
+- `sudo systemctl reload nginx`
+- `sudo systemctl status nginx`
+
+Health checks:
+
+- `curl -s https://erp.signatureauto.care/api/docs | head`
+- `curl -s https://erp.signatureauto.care/pdf/health`
+- `curl -i https://erp.signatureauto.care/api/auth/login -H "Content-Type: application/json" -d '{"email":"owner@signatureautocare.com","password":"Pass1234!"}'`
 
 ## Login
 

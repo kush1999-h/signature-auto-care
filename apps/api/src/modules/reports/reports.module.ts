@@ -5,6 +5,8 @@ import {
   InvoiceSchema,
   Payment,
   PaymentSchema,
+  WorkOrder,
+  WorkOrderSchema,
   Expense,
   ExpenseSchema,
   Payable,
@@ -20,6 +22,7 @@ import { ReportsController } from "./reports.controller";
     MongooseModule.forFeature([
       { name: Invoice.name, schema: InvoiceSchema },
       { name: Payment.name, schema: PaymentSchema },
+      { name: WorkOrder.name, schema: WorkOrderSchema },
       { name: Expense.name, schema: ExpenseSchema },
       { name: Payable.name, schema: PayableSchema },
       { name: InventoryTransaction.name, schema: InventoryTransactionSchema }

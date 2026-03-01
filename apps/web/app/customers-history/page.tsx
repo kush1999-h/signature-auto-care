@@ -27,7 +27,11 @@ type Invoice = {
 
 export default function CustomersHistoryPage() {
   const { session } = useAuth();
-  const allowed = ["OWNER_ADMIN", "OPS_MANAGER"].includes(session?.user?.role || "");
+  const permissions = session?.user?.permissions || [];
+  const allowed =
+    permissions.includes("CUSTOMERS_READ") &&
+    permissions.includes("VEHICLES_READ") &&
+    permissions.includes("INVOICES_READ");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "invoices" | "vehicles">("all");
 
@@ -98,7 +102,9 @@ export default function CustomersHistoryPage() {
       <Shell>
         <div className="glass p-6 rounded-xl">
           <p className="font-semibold text-foreground">No access</p>
-          <p className="text-sm text-muted-foreground">Only Owner/Admin or Operations Manager can view customer history.</p>
+          <p className="text-sm text-muted-foreground">
+            Customer history requires customer, vehicle, and invoice access.
+          </p>
         </div>
       </Shell>
     );

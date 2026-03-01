@@ -46,7 +46,7 @@ export const calcInvoiceRevenue = (inv: InvoiceLite) => {
 export const calcInvoiceCogs = (inv: InvoiceLite) => {
   const lineItems = Array.isArray(inv.lineItems) ? inv.lineItems : [];
   return lineItems.reduce((sum, item) => {
-    if (item.type !== "PART") return sum;
+    if (item.type !== "PART" && item.type !== "SERVICE" && item.type !== "OTHER") return sum;
     const cost = toNumber(item.costAtTime);
     const qty = Number(item.quantity) || 0;
     if (!Number.isFinite(cost) || cost <= 0 || qty <= 0) return sum;

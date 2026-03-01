@@ -6,6 +6,8 @@ import {
   InvoiceSchema,
   Payment,
   PaymentSchema,
+  WorkOrder,
+  WorkOrderSchema,
   Expense,
   ExpenseSchema,
   Payable,
@@ -32,6 +34,7 @@ describe("ReportsService revenue coverage", () => {
 
     const invoiceModel = connection.model(Invoice.name, InvoiceSchema) as any;
     const paymentModel = connection.model(Payment.name, PaymentSchema) as any;
+    const workOrderModel = connection.model(WorkOrder.name, WorkOrderSchema) as any;
     const expenseModel = connection.model(Expense.name, ExpenseSchema) as any;
     const payableModel = connection.model(Payable.name, PayableSchema) as any;
     const trxModel = connection.model(
@@ -42,6 +45,7 @@ describe("ReportsService revenue coverage", () => {
     service = new ReportsService(
       invoiceModel,
       paymentModel,
+      workOrderModel,
       expenseModel,
       payableModel,
       trxModel

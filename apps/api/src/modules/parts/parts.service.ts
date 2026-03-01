@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from "@nestjs/comm
 import { InjectConnection, InjectModel } from "@nestjs/mongoose";
 import { Connection, Model, Types } from "mongoose";
 import { InventoryReferenceType, InventoryTransactionType } from "@signature-auto-care/shared";
-import { Expense, ExpenseDocument, InventoryTransaction, Part, Payable, PayableDocument } from "../../schemas";
+import { InventoryTransaction, Part, Payable, PayableDocument } from "../../schemas";
 import { AuditService } from "../audit/audit.service";
 import { InsufficientStockException } from "../../common/exceptions/insufficient-stock.exception";
 
@@ -23,7 +23,6 @@ export class PartsService {
   constructor(
     @InjectModel(Part.name) private partModel: Model<Part>,
     @InjectModel(InventoryTransaction.name) private trxModel: Model<InventoryTransaction>,
-    @InjectModel(Expense.name) private expenseModel: Model<ExpenseDocument>,
     @InjectModel(Payable.name) private payableModel: Model<PayableDocument>,
     @InjectConnection() private connection: Connection,
     private audit: AuditService
@@ -205,42 +204,7 @@ export class PartsService {
         { session }
       );
 
-      let expenseId: string | undefined;
       let payableId: string | undefined;
-      if (paymentMethod === "CASH") {
-        const totalCost = unitCostNum * qty;
-        const noteParts = [
-          `Part: ${part.partName}`,
-          `SKU: ${part.sku}`,
-          `Qty: ${qty}`,
-          `Unit: ${unitCostNum.toFixed(2)}`,
-          payload.vendorName ? `Vendor: ${payload.vendorName}` : null,
-          payload.performedByName
-            ? `Purchased by: ${payload.performedByName}${payload.performedByRole ? ` (${payload.performedByRole})` : ""}`
-            : null
-        ].filter(Boolean);
-        const [expense] = await this.expenseModel.create(
-          [
-            {
-              category: "Supplies",
-              amount: this.decimalFromNumber(totalCost),
-              expenseDate: new Date(),
-              note: noteParts.join(" | ")
-            }
-          ],
-          { session }
-        );
-        expenseId = expense._id.toString();
-        await this.audit.record({
-          actionType: "EXPENSE_CREATE",
-          entityType: "Expense",
-          entityId: expenseId,
-          performedByEmployeeId: new Types.ObjectId(payload.performedBy),
-          performedByName: payload.performedByName,
-          performedByRole: payload.performedByRole,
-          after: expense.toObject()
-        });
-      }
 
       if (paymentMethod === "CREDIT") {
         const totalCost = unitCostNum * qty;
@@ -298,7 +262,6 @@ export class PartsService {
           unitCost: payload.unitCost,
           paymentMethod,
           vendorName: payload.vendorName,
-          expenseId,
           payableId,
           ...(sellingPriceNum !== undefined ? { sellingPrice: sellingPriceNum } : {})
         }

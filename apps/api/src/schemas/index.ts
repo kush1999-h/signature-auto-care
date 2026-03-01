@@ -1,6 +1,7 @@
 export * from "./user.schema";
 export * from "./role.schema";
 export * from "./part.schema";
+export * from "./service.schema";
 export * from "./inventory-transaction.schema";
 export * from "./customer.schema";
 export * from "./vehicle.schema";

@@ -1,4 +1,4 @@
-import { Injectable, ConflictException, NotFoundException, ForbiddenException } from "@nestjs/common";
+import { Injectable, ConflictException, NotFoundException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
 import * as bcrypt from "bcrypt";
@@ -67,12 +67,9 @@ export class UsersService {
       role: Role;
       permissions: Permission[];
     }>,
-    actor: { role?: string }
+    actor: { role?: string; permissions?: string[] }
   ) {
-    if (actor?.role !== "OWNER_ADMIN") {
-      throw new ForbiddenException("Only OWNER_ADMIN can edit users");
-    }
-
+    void actor;
     const update: Partial<User> & { passwordHash?: string; permissions?: Permission[] } = {};
 
     if (payload.name !== undefined) update.name = payload.name;

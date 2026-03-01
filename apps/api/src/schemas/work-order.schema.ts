@@ -15,11 +15,17 @@ export class WorkOrder {
   @Prop()
   complaint?: string;
 
+  @Prop({ type: Number, min: 0, max: 100 })
+  oilLevelPct?: number;
+
   @Prop({
     enum: Object.values(WorkOrderStatus),
     default: WorkOrderStatus.SCHEDULED,
   })
   status!: string;
+
+  @Prop({ type: Date, default: null })
+  deliveredAt?: Date | null;
 
   @Prop({
     type: [
@@ -56,13 +62,34 @@ export class WorkOrder {
   @Prop({
     type: [
       {
-        name: String,
-        amount: { type: MongooseSchema.Types.Decimal128 },
+        serviceId: { type: Types.ObjectId, ref: "Service" },
+        nameAtTime: String,
+        qty: Number,
+        unitPriceAtTime: { type: MongooseSchema.Types.Decimal128 },
+        unitCostAtTime: { type: MongooseSchema.Types.Decimal128 },
       },
     ],
     default: [],
   })
-  otherCharges!: { name: string; amount: Types.Decimal128 }[];
+  servicesUsed!: {
+    serviceId: Types.ObjectId;
+    nameAtTime: string;
+    qty: number;
+    unitPriceAtTime: Types.Decimal128;
+    unitCostAtTime?: Types.Decimal128;
+  }[];
+
+  @Prop({
+    type: [
+      {
+        name: String,
+        amount: { type: MongooseSchema.Types.Decimal128 },
+        costAtTime: { type: MongooseSchema.Types.Decimal128 },
+      },
+    ],
+    default: [],
+  })
+  otherCharges!: { name: string; amount: Types.Decimal128; costAtTime?: Types.Decimal128 }[];
 
   @Prop({
     type: [
@@ -79,6 +106,7 @@ export class WorkOrder {
 
 export const WorkOrderSchema = SchemaFactory.createForClass(WorkOrder);
 WorkOrderSchema.index({ status: 1 });
+WorkOrderSchema.index({ deliveredAt: 1 });
 WorkOrderSchema.index({ "assignedEmployees.employeeId": 1 });
 
 function toNumber(val: unknown) {
@@ -105,10 +133,21 @@ WorkOrderSchema.set("toJSON", {
     }
     if (Array.isArray(ret.otherCharges)) {
       ret.otherCharges = ret.otherCharges.map((c: unknown) => {
-        const charge = c as { amount?: unknown };
+        const charge = c as { amount?: unknown; costAtTime?: unknown };
         return {
           ...charge,
           amount: toNumber(charge.amount),
+          costAtTime: toNumber(charge.costAtTime),
+        };
+      });
+    }
+    if (Array.isArray(ret.servicesUsed)) {
+      ret.servicesUsed = ret.servicesUsed.map((s: unknown) => {
+        const service = s as { unitPriceAtTime?: unknown; unitCostAtTime?: unknown };
+        return {
+          ...service,
+          unitPriceAtTime: toNumber(service.unitPriceAtTime),
+          unitCostAtTime: toNumber(service.unitCostAtTime),
         };
       });
     }

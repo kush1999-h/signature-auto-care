@@ -34,6 +34,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { href: "/" as const, label: "Dashboard", icon: Gauge },
   { href: "/inventory" as const, label: "Inventory", icon: Package, permission: "PARTS_READ" },
+  { href: "/services" as const, label: "Services", icon: Wrench, permission: "SERVICES_READ" },
   {
     href: "/work-orders" as const,
     label: "Work Orders",
@@ -43,9 +44,19 @@ const navItems: NavItem[] = [
   { href: "/counter-sale" as const, label: "Counter Sale", icon: DollarSign, permission: "INVENTORY_COUNTER_SALE" },
   { href: "/invoices" as const, label: "Invoices", icon: Receipt, permission: "INVOICES_READ" },
   { href: "/payables" as const, label: "Payables", icon: DollarSign, permission: "PAYABLES_READ" },
-  { href: "/customers-history" as const, label: "Customers", icon: Users, roles: ["OWNER_ADMIN", "OPS_MANAGER"] },
+  {
+    href: "/customers-history" as const,
+    label: "Customers",
+    icon: Users,
+    permissions: ["CUSTOMERS_READ", "VEHICLES_READ", "INVOICES_READ"]
+  },
   { href: "/expenses" as const, label: "Expenses", icon: Wrench, permission: "EXPENSES_READ" },
-  { href: "/reports" as const, label: "Reports", icon: BarChart3, permission: "REPORTS_READ_SALES" },
+  {
+    href: "/reports" as const,
+    label: "Reports",
+    icon: BarChart3,
+    permissions: ["REPORTS_READ_SALES", "REPORTS_READ_PROFIT", "REPORTS_READ_INVENTORY"]
+  },
   { href: "/audit-logs" as const, label: "Audit Logs", icon: ShieldCheck, permission: "AUDITLOGS_READ" },
   { href: "/intake" as const, label: "Intake", icon: ClipboardPlus, permission: "WORKORDERS_CREATE" },
   { href: "/users" as const, label: "Users", icon: Users, permission: "USERS_READ" }
