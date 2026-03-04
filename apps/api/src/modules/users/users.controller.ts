@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards, ForbiddenException } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards, ForbiddenException } from "@nestjs/common";
 import { IsArray, IsEmail, IsOptional, IsString } from "class-validator";
 import { UsersService } from "./users.service";
 import { JwtAuthGuard } from "../auth/jwt.guard";
@@ -6,6 +6,7 @@ import { PermissionsGuard } from "../../common/guards/permissions.guard";
 import { PermissionsRequired } from "../../common/decorators/permissions.decorator";
 import { Permissions, Role, Permission } from "@signature-auto-care/shared";
 import { AuthUser, CurrentUser } from "../../common/decorators/current-user.decorator";
+import { Public } from "../../common/decorators/public.decorator";
 
 class CreateUserDto {
   @IsEmail()
@@ -49,6 +50,14 @@ class BootstrapSeedDto extends CreateUserDto {
   secret?: string;
 }
 
+class VerifyOtpDto {
+  @IsEmail()
+  email!: string;
+
+  @IsString()
+  otp!: string;
+}
+
 @Controller("users")
 export class UsersController {
   constructor(private usersService: UsersService) {}
@@ -65,6 +74,12 @@ export class UsersController {
   @PermissionsRequired(Permissions.USERS_CREATE)
   async create(@Body() body: CreateUserDto) {
     return this.usersService.create(body);
+  }
+
+  @Public()
+  @Post("verify-email-otp")
+  async verifyEmailOtp(@Body() body: VerifyOtpDto) {
+    return this.usersService.verifyEmailOtp(body.email, body.otp);
   }
 
   // temporary bootstrap endpoint to seed first admin when no users exist
@@ -106,5 +121,20 @@ export class UsersController {
   @PermissionsRequired(Permissions.USERS_DISABLE)
   async disable(@Param("id") id: string) {
     return this.usersService.disable(id);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Post(":id/resend-otp")
+  @PermissionsRequired(Permissions.USERS_CREATE)
+  async resendOtp(@Param("id") id: string) {
+    return this.usersService.resendVerificationOtp(id);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Delete(":id")
+  @PermissionsRequired(Permissions.USERS_DISABLE)
+  async deleteUser(@Param("id") id: string, @CurrentUser() user: AuthUser) {
+    const actorId = user.userId || user._id || user.sub;
+    return this.usersService.delete(id, actorId);
   }
 }

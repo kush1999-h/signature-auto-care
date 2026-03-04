@@ -15,6 +15,7 @@ import {
   InvoiceStatus,
   WorkOrderStatusType,
   Role,
+  Roles,
 } from "@signature-auto-care/shared";
 import {
   WorkOrder,
@@ -47,6 +48,17 @@ type BillingServiceLineInput = {
   unitPriceAtTime?: number;
   unitCostAtTime?: number;
   nameAtTime?: string;
+};
+
+type CreateWorkOrderInput = Partial<WorkOrder> & {
+  createdBy?: string;
+  isHistorical?: boolean;
+  dateIn?: string | Date;
+  dateOut?: string | Date;
+  historicalBillAmount?: number;
+  historicalCostAmount?: number;
+  historicalSource?: string;
+  paymentMethod?: string;
 };
 
 const normalizeId = (value: unknown) => {
@@ -109,7 +121,30 @@ export class WorkOrdersService {
     const subtotal = labor + partsTotal + servicesTotal + otherTotal;
     const tax = 0;
     const total = subtotal + tax;
-    return { labor, partsTotal, servicesTotal, otherTotal, subtotal, tax, total };
+    const advanceReceived = Math.max(
+      0,
+      this.decimalToNumber((wo as WorkOrder & { advanceAmount?: Types.Decimal128 }).advanceAmount || 0)
+    );
+    const storedAdvanceApplied = Math.max(
+      0,
+      this.decimalToNumber(
+        (wo as WorkOrder & { advanceAppliedAmount?: Types.Decimal128 }).advanceAppliedAmount || 0
+      )
+    );
+    const advanceApplied = Math.min(storedAdvanceApplied, advanceReceived, total);
+    const amountDue = Math.max(total - advanceApplied, 0);
+    return {
+      labor,
+      partsTotal,
+      servicesTotal,
+      otherTotal,
+      subtotal,
+      tax,
+      total,
+      advanceReceived,
+      advanceApplied,
+      amountDue,
+    };
   }
 
   private buildInvoicePayload(wo: WorkOrder) {
@@ -427,6 +462,10 @@ export class WorkOrdersService {
     const normalizedWorkOrder = {
       ...wo,
       billableLaborAmount: this.decimalToNumber((wo as { billableLaborAmount?: Types.Decimal128 }).billableLaborAmount || 0),
+      advanceAmount: this.decimalToNumber((wo as { advanceAmount?: Types.Decimal128 }).advanceAmount || 0),
+      advanceAppliedAmount: this.decimalToNumber(
+        (wo as { advanceAppliedAmount?: Types.Decimal128 }).advanceAppliedAmount || 0
+      ),
       servicesUsed: normalizedServices,
       otherCharges: normalizedOtherCharges,
     };
@@ -455,10 +494,128 @@ export class WorkOrdersService {
     };
   }
 
-  async create(payload: Partial<WorkOrder> & { createdBy?: string }, user?: AuthUser) {
-    const wo = await this.workOrderModel.create(payload);
+  async create(payload: CreateWorkOrderInput, user?: AuthUser) {
+    const referenceRaw = (payload as Partial<WorkOrder> & { reference?: string }).reference;
+    const advanceRaw = (payload as Partial<WorkOrder> & { advanceAmount?: unknown }).advanceAmount;
+    const reference = typeof referenceRaw === "string" ? referenceRaw.trim() : "";
+    if (reference.length > 120) {
+      throw new BadRequestException("Reference must be 120 characters or fewer");
+    }
+    const advanceAmount = advanceRaw === undefined ? 0 : Number(advanceRaw);
+    if (!Number.isFinite(advanceAmount) || advanceAmount < 0) {
+      throw new BadRequestException("Advance amount must be a non-negative number");
+    }
+
+    const allowedStatuses = new Set<WorkOrderStatusType>(Object.values(WorkOrderStatus));
+    const requestedStatus = payload.status && allowedStatuses.has(payload.status as WorkOrderStatusType)
+      ? (payload.status as WorkOrderStatusType)
+      : WorkOrderStatus.SCHEDULED;
+
+    const isHistorical = Boolean(payload.isHistorical);
+    const roleName = String(user?.role || "");
+    const canBackfill =
+      Boolean(user?.permissions?.includes(Permissions.WORKORDERS_CREATE_HISTORICAL)) ||
+      roleName === Roles.OWNER_ADMIN ||
+      roleName === Roles.OPS_MANAGER ||
+      roleName === Roles.SERVICE_ADVISOR;
+    if (isHistorical && !canBackfill) {
+      throw new ForbiddenException("No permission to create historical work orders");
+    }
+
+    const parseOptionalDate = (value?: string | Date) => {
+      if (!value) return null;
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    };
+    const dateIn = parseOptionalDate(payload.dateIn);
+    const dateOut = parseOptionalDate(payload.dateOut);
+    if (isHistorical && !dateIn) {
+      throw new BadRequestException("dateIn is required for historical entries");
+    }
+    if (dateIn && dateOut && dateOut.getTime() < dateIn.getTime()) {
+      throw new BadRequestException("dateOut must be on or after dateIn");
+    }
+
+    const historicalBillAmountRaw = payload.historicalBillAmount;
+    const historicalCostAmountRaw = payload.historicalCostAmount;
+    const historicalBillAmount =
+      historicalBillAmountRaw === undefined || historicalBillAmountRaw === null
+        ? null
+        : Number(historicalBillAmountRaw);
+    const historicalCostAmount =
+      historicalCostAmountRaw === undefined || historicalCostAmountRaw === null
+        ? null
+        : Number(historicalCostAmountRaw);
+    if (historicalBillAmount !== null && (!Number.isFinite(historicalBillAmount) || historicalBillAmount < 0)) {
+      throw new BadRequestException("Historical bill amount must be a non-negative number");
+    }
+    if (historicalCostAmount !== null && (!Number.isFinite(historicalCostAmount) || historicalCostAmount < 0)) {
+      throw new BadRequestException("Historical cost amount must be a non-negative number");
+    }
+    if ((historicalCostAmount || 0) > 0 && (historicalBillAmount || 0) <= 0) {
+      throw new BadRequestException("Historical bill amount is required when cost is provided");
+    }
+
+    const historicalSource =
+      typeof payload.historicalSource === "string" ? payload.historicalSource.trim() : "";
+    if (historicalSource.length > 200) {
+      throw new BadRequestException("Historical source must be 200 characters or fewer");
+    }
+
+    const normalizedOtherCharges =
+      historicalBillAmount !== null && historicalBillAmount > 0
+        ? [
+            {
+              name: "Historical carried-in bill",
+              amount: this.decimalFromNumber(historicalBillAmount),
+              costAtTime: this.decimalFromNumber(historicalCostAmount || 0),
+            },
+          ]
+        : payload.otherCharges;
+
+    const createPayload: Partial<WorkOrder> = {
+      ...payload,
+      status: requestedStatus,
+      reference: reference || undefined,
+      advanceAmount: this.decimalFromNumber(advanceAmount),
+      advanceAppliedAmount: this.decimalFromNumber(0),
+      dateIn: dateIn || undefined,
+      deliveredAt:
+        requestedStatus === WorkOrderStatus.CLOSED ? dateOut || dateIn || new Date() : null,
+      isHistorical,
+      historicalSource: historicalSource || undefined,
+      otherCharges: normalizedOtherCharges,
+    };
+
+    let wo = await this.workOrderModel.create(createPayload);
     const performerId = user ? resolveUserId(user) : payload.createdBy;
     const performerObjectId = performerId ? toObjectId(performerId) : null;
+
+    if (isHistorical && dateIn) {
+      await this.workOrderModel.collection.updateOne(
+        { _id: wo._id },
+        { $set: { createdAt: dateIn, updatedAt: dateIn, dateIn } }
+      );
+      const refreshed = await this.workOrderModel.findById(wo._id);
+      if (refreshed) wo = refreshed;
+    }
+
+    if (requestedStatus === WorkOrderStatus.CLOSED && user) {
+      await this.updateBilling(
+        wo._id.toString(),
+        { paymentMethod: payload.paymentMethod || "CASH" },
+        user
+      );
+      if (dateOut) {
+        await this.workOrderModel.updateOne(
+          { _id: wo._id },
+          { $set: { deliveredAt: dateOut } }
+        );
+      }
+      const refreshedClosed = await this.workOrderModel.findById(wo._id);
+      if (refreshedClosed) wo = refreshedClosed;
+    }
+
     if (performerObjectId) {
       await this.audit.record({
         actionType: "WORK_ORDER_CREATED",
@@ -468,6 +625,21 @@ export class WorkOrdersService {
         performedByRole: user?.role,
         after: { status: wo.status, customerId: wo.customerId, vehicleId: wo.vehicleId },
       });
+      if (isHistorical) {
+        await this.audit.record({
+          actionType: "WORK_ORDER_BACKFILLED",
+          entityType: "WorkOrder",
+          entityId: wo._id.toString(),
+          performedByEmployeeId: performerObjectId,
+          performedByRole: user?.role,
+          after: {
+            dateIn: dateIn || undefined,
+            dateOut: dateOut || undefined,
+            historicalBillAmount: historicalBillAmount ?? undefined,
+            historicalCostAmount: historicalCostAmount ?? undefined,
+          },
+        });
+      }
     }
     return wo;
   }
@@ -746,6 +918,14 @@ export class WorkOrdersService {
       wo.servicesUsed = normalizedServices;
     }
 
+    const preAdvanceFinancials = this.computeFinancials(wo);
+    const advanceReceived = Math.max(
+      0,
+      this.decimalToNumber((wo as WorkOrder & { advanceAmount?: Types.Decimal128 }).advanceAmount || 0)
+    );
+    const autoApplied = Math.min(advanceReceived, preAdvanceFinancials.total);
+    wo.advanceAppliedAmount = this.decimalFromNumber(autoApplied);
+
     const hasBillingActivity =
       payload.billableLaborAmount !== undefined ||
       payload.servicesUsed !== undefined ||
@@ -767,6 +947,9 @@ export class WorkOrdersService {
         after: {
           billableLaborAmount: financials.labor,
           otherCharges: wo.otherCharges,
+          advanceAmount: financials.advanceReceived,
+          advanceAppliedAmount: financials.advanceApplied,
+          amountDue: financials.amountDue,
         },
       });
     }
@@ -802,7 +985,7 @@ export class WorkOrdersService {
         }
 
         // Ensure payment recorded for closed invoice
-        const paymentAmount = this.decimalFromNumber(invoiceData.total);
+        const paymentAmount = this.decimalFromNumber(financials.amountDue);
         const paymentMethod = payload.paymentMethod?.toUpperCase() || "CASH";
         let payment = await this.paymentModel.findOne({ invoiceId: invoice._id });
         if (payment) {

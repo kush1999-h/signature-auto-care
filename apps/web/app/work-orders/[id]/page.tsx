@@ -63,12 +63,18 @@ type WorkOrderDetail = {
   workOrder?: {
     _id?: string;
     complaint?: string;
+    reference?: string;
     status?: string;
+    dateIn?: string;
+    isHistorical?: boolean;
+    historicalSource?: string;
     createdAt?: string;
     updatedAt?: string;
     deliveredAt?: string | null;
     notes?: WorkOrderNote[];
     billableLaborAmount?: number;
+    advanceAmount?: number;
+    advanceAppliedAmount?: number;
     servicesUsed?: WorkOrderService[];
     otherCharges?: { name?: string; amount?: number; costAtTime?: number }[];
   };
@@ -89,6 +95,9 @@ type WorkOrderDetail = {
     subtotal?: number;
     tax?: number;
     total?: number;
+    advanceReceived?: number;
+    advanceApplied?: number;
+    amountDue?: number;
   };
   customer?: { name?: string; phone?: string; email?: string };
   vehicle?: { make?: string; model?: string; year?: string | number; plate?: string; vin?: string };
@@ -164,6 +173,14 @@ const calculateFinancials = (
   const otherTotal = (workOrder?.otherCharges || []).reduce((sum: number, charge) => sum + Number(charge?.amount || 0), 0);
   const subtotal = labor + partsTotal + servicesTotal + otherTotal;
   const tax = 0;
+  const total = subtotal + tax;
+  const advanceReceived = Number(workOrder?.advanceAmount || 0);
+  const advanceAppliedStored = Number(workOrder?.advanceAppliedAmount || 0);
+  const advanceApplied = Math.min(
+    Math.max(0, advanceAppliedStored),
+    Math.max(0, advanceReceived),
+    total
+  );
   return {
     labor,
     partsTotal,
@@ -171,7 +188,10 @@ const calculateFinancials = (
     otherTotal,
     subtotal,
     tax,
-    total: subtotal + tax,
+    total,
+    advanceReceived,
+    advanceApplied,
+    amountDue: Math.max(total - advanceApplied, 0),
   };
 };
 
@@ -514,6 +534,12 @@ export default function WorkOrderDetailPage() {
   const taxPlaceholder = 0;
   const draftSubtotal = laborAmountDraft + partsTotal + servicesDraft + otherChargesDraft;
   const draftGrandTotal = draftSubtotal + taxPlaceholder;
+  const advanceReceived = Number(wo?.advanceAmount || financials.advanceReceived || 0);
+  const advanceAppliedDraft = Math.min(advanceReceived, draftGrandTotal);
+  const draftAmountDue = Math.max(
+    draftGrandTotal - advanceAppliedDraft,
+    0
+  );
   const billingLocked = wo?.status === "Closed";
   const billingDisabledReason = !canEditBilling
     ? "Missing billing edit permission."
@@ -608,7 +634,6 @@ export default function WorkOrderDetailPage() {
     if (!Number.isFinite(laborVal) || laborVal < 0) {
       nextLaborError = "Enter a valid non-negative labor amount.";
     }
-
     const normalizedCharges: { name: string; amount: number; costAtTime?: number }[] = [];
     chargeRows.forEach((row, idx) => {
       const hasContent =
@@ -732,9 +757,18 @@ export default function WorkOrderDetailPage() {
           <p className="text-muted-foreground text-sm">
             {wo?.complaint || "General service"}
           </p>
+          <p className="text-xs text-muted-foreground">
+            Reference: {wo?.reference?.trim() ? wo.reference : "--"}
+          </p>
           <div className="text-xs text-muted-foreground space-y-1">
-            <p>Created: {formatDateTime(wo?.createdAt)}</p>
+            <p>Created: {formatDateTime(wo?.dateIn || wo?.createdAt)}</p>
             <p>Date Out: {wo?.deliveredAt ? formatDateTime(wo.deliveredAt) : "--"}</p>
+            {wo?.isHistorical && (
+              <p>
+                Historical entry
+                {wo?.historicalSource ? ` | Source: ${wo.historicalSource}` : ""}
+              </p>
+            )}
           </div>
           {(detail.data?.audit?.createdBy || detail.data?.audit?.billedBy) && (
             <div className="text-xs text-muted-foreground space-y-1">
@@ -768,6 +802,11 @@ export default function WorkOrderDetailPage() {
               {formatMoney(financials.partsTotal)} | Services Tk.{" "}
               {formatMoney(financials.servicesTotal)} | Other Tk.{" "}
               {formatMoney(financials.otherTotal)}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Advance Tk. {formatMoney(financials.advanceApplied)} /{" "}
+              {formatMoney(financials.advanceReceived)} | Due Tk.{" "}
+              {formatMoney(financials.amountDue)}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1303,6 +1342,15 @@ export default function WorkOrderDetailPage() {
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">
+                  Advance (auto-applied)
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Received Tk. {formatMoney(advanceReceived)} | Applied Tk.{" "}
+                  {formatMoney(advanceAppliedDraft)}
+                </p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">
                   Labor (billable)
                 </p>
                 <CurrencyInput
@@ -1337,11 +1385,19 @@ export default function WorkOrderDetailPage() {
                     Missing service catalog read permission.
                   </p>
                 )}
+                <div className="hidden md:grid md:grid-cols-12 gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <span className="md:col-span-4">Service</span>
+                  <span className="md:col-span-1">Qty</span>
+                  <span className="md:col-span-2">Unit Price</span>
+                  <span className="md:col-span-2">Unit Cost</span>
+                  <span className="md:col-span-2 text-right">Line</span>
+                  <span className="md:col-span-1 text-right">Action</span>
+                </div>
                 {serviceRows.map((row, idx) => {
                   const rowLineTotal =
                     (Number(row.qty || "0") || 0) * (Number(row.unitPriceAtTime || "0") || 0);
                   return (
-                    <div key={idx} className="grid grid-cols-12 gap-2 items-start">
+                    <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-start rounded-md border border-border/40 p-2 md:p-0 md:border-0">
                       <select
                         value={row.serviceId}
                         onChange={(e) => {
@@ -1373,7 +1429,7 @@ export default function WorkOrderDetailPage() {
                           });
                         }}
                         disabled={billingDisabled || !perms.canReadServices}
-                        className="col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                        className="md:col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
                         title={billingDisabledReason}
                       >
                         <option value="">Select service</option>
@@ -1395,7 +1451,7 @@ export default function WorkOrderDetailPage() {
                           });
                         }}
                         placeholder="Qty"
-                        className="col-span-1 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                        className="md:col-span-1 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
                         disabled={billingDisabled}
                         title={billingDisabledReason}
                       />
@@ -1416,7 +1472,7 @@ export default function WorkOrderDetailPage() {
                         min={0}
                         disabled={billingDisabled}
                         title={billingDisabledReason}
-                        className="col-span-2"
+                        className="md:col-span-2"
                       />
                       <CurrencyInput
                         value={row.unitCostAtTime}
@@ -1435,9 +1491,9 @@ export default function WorkOrderDetailPage() {
                         min={0}
                         disabled={billingDisabled}
                         title={billingDisabledReason}
-                        className="col-span-2"
+                        className="md:col-span-2"
                       />
-                      <div className="col-span-2 text-[11px] text-muted-foreground text-right">
+                      <div className="md:col-span-2 text-[11px] text-muted-foreground text-right">
                         Line Tk. {formatMoney(rowLineTotal)}
                       </div>
                       <button
@@ -1445,7 +1501,7 @@ export default function WorkOrderDetailPage() {
                         onClick={() => removeServiceRow(idx)}
                         disabled={serviceRows.length === 1 || billingDisabled}
                         title={billingDisabledReason}
-                        className="col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                        className="md:col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 text-right"
                       >
                         Remove
                       </button>
@@ -1471,10 +1527,17 @@ export default function WorkOrderDetailPage() {
                     Add
                   </button>
                 </div>
+                <div className="hidden md:grid md:grid-cols-12 gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <span className="md:col-span-4">Label</span>
+                  <span className="md:col-span-3">Selling</span>
+                  <span className="md:col-span-3">Cost</span>
+                  <span className="md:col-span-1 text-right">Line</span>
+                  <span className="md:col-span-1 text-right">Action</span>
+                </div>
                 {chargeRows.map((row, idx) => (
                   <div
                     key={idx}
-                    className="grid grid-cols-12 gap-2 items-center"
+                    className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center rounded-md border border-border/40 p-2 md:p-0 md:border-0"
                   >
                     <input
                       value={row.name}
@@ -1487,11 +1550,11 @@ export default function WorkOrderDetailPage() {
                         );
                       }}
                       placeholder="Label (e.g., Fuel line service)"
-                      className="col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
+                      className="md:col-span-4 bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm disabled:opacity-60"
                       disabled={billingDisabled}
                       title={billingDisabledReason}
                     />
-                    <div className="col-span-3">
+                    <div className="md:col-span-3">
                       <CurrencyInput
                         value={row.amount}
                         onChange={(val) => {
@@ -1516,7 +1579,7 @@ export default function WorkOrderDetailPage() {
                         <p className="text-[11px] text-red-400 mt-1">{chargeErrors[idx]}</p>
                       )}
                     </div>
-                    <div className="col-span-3">
+                    <div className="md:col-span-3">
                       <CurrencyInput
                         value={row.costAtTime}
                         onChange={(val) => {
@@ -1538,7 +1601,7 @@ export default function WorkOrderDetailPage() {
                         title={billingDisabledReason}
                       />
                     </div>
-                    <div className="col-span-1 text-[11px] text-muted-foreground text-right">
+                    <div className="md:col-span-1 text-[11px] text-muted-foreground text-right">
                       Tk. {formatMoney(parseAmount(row.amount))}
                     </div>
                     <button
@@ -1546,7 +1609,7 @@ export default function WorkOrderDetailPage() {
                       onClick={() => removeChargeRow(idx)}
                       disabled={chargeRows.length === 1 || billingDisabled}
                       title={billingDisabledReason}
-                      className="col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                      className="md:col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 text-right"
                     >
                       Remove
                     </button>
@@ -1561,9 +1624,15 @@ export default function WorkOrderDetailPage() {
                 <p>Parts Tk. {formatMoney(partsTotal)}</p>
                 <p>Services Tk. {formatMoney(servicesDraft)}</p>
                 <p>Other Tk. {formatMoney(otherChargesDraft)}</p>
+                <p>
+                  Advance applied Tk. {formatMoney(advanceAppliedDraft)}
+                </p>
                 <p>Tax (placeholder) Tk. {formatMoney(taxPlaceholder)}</p>
                 <p className="text-foreground font-semibold">
                   Total Tk. {formatMoney(draftGrandTotal)}
+                </p>
+                <p className="text-foreground font-semibold">
+                  Amount due Tk. {formatMoney(draftAmountDue)}
                 </p>
               </div>
               <button

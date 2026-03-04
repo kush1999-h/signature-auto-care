@@ -11,7 +11,8 @@ const roleOptions = [
   { value: "OPS_MANAGER", label: "Operations Manager" },
   { value: "SERVICE_ADVISOR", label: "Service Advisor" },
   { value: "INVENTORY_MANAGER", label: "Inventory Manager" },
-  { value: "ACCOUNTANT", label: "Accountant" }
+  { value: "ACCOUNTANT", label: "Accountant" },
+  { value: "AUDITOR", label: "Auditor" }
 ];
 const allPermissions = [
   "USERS_READ",
@@ -34,6 +35,7 @@ const allPermissions = [
   "WORKORDERS_READ_ALL",
   "WORKORDERS_READ_ASSIGNED",
   "WORKORDERS_CREATE",
+  "WORKORDERS_CREATE_HISTORICAL",
   "WORKORDERS_UPDATE_STATUS",
   "WORKORDERS_BILLING_EDIT",
   "WORKORDERS_ASSIGN_EMPLOYEE",
@@ -80,12 +82,168 @@ const allPermissions = [
   "AUDITLOGS_READ"
 ] as const;
 
+type RoleKey =
+  | "OWNER_ADMIN"
+  | "OPS_MANAGER"
+  | "SERVICE_ADVISOR"
+  | "INVENTORY_MANAGER"
+  | "ACCOUNTANT"
+  | "AUDITOR";
+
+const roleDefaultPermissions: Record<RoleKey, readonly string[]> = {
+  OWNER_ADMIN: allPermissions,
+  OPS_MANAGER: [
+    "USERS_READ",
+    "USERS_UPDATE",
+    "USERS_DISABLE",
+    "ROLES_READ",
+    "PERMISSIONS_READ",
+    "CUSTOMERS_READ",
+    "CUSTOMERS_CREATE",
+    "CUSTOMERS_UPDATE",
+    "VEHICLES_READ",
+    "VEHICLES_CREATE",
+    "VEHICLES_UPDATE",
+    "WORKORDERS_READ_ALL",
+    "WORKORDERS_CREATE",
+    "WORKORDERS_CREATE_HISTORICAL",
+    "WORKORDERS_UPDATE_STATUS",
+    "WORKORDERS_BILLING_EDIT",
+    "WORKORDERS_ASSIGN_EMPLOYEE",
+    "WORKORDERS_ADD_NOTES",
+    "WORKORDERS_ADD_ATTACHMENTS",
+    "WORKORDERS_READ_SCHEDULED_POOL",
+    "TIMELOGS_CREATE_SELF",
+    "TIMELOGS_READ_SELF",
+    "TIMELOGS_READ_ALL",
+    "PARTS_READ",
+    "PARTS_CREATE",
+    "PARTS_UPDATE",
+    "SERVICES_READ",
+    "SERVICES_CREATE",
+    "SERVICES_UPDATE",
+    "SERVICES_PRICE_UPDATE",
+    "INVENTORY_PRICE_UPDATE",
+    "INVENTORY_RECEIVE",
+    "INVENTORY_ADJUST",
+    "INVENTORY_ISSUE_TO_WORKORDER",
+    "INVENTORY_COUNTER_SALE",
+    "INVENTORY_REPORTS_READ",
+    "INVOICES_READ",
+    "INVOICES_CREATE",
+    "INVOICES_CLOSE",
+    "PAYMENTS_CREATE",
+    "PAYMENTS_READ",
+    "PAYABLES_READ",
+    "PAYABLES_UPDATE",
+    "EXPENSES_READ",
+    "EXPENSES_CREATE",
+    "EXPENSES_UPDATE",
+    "EXPENSES_DELETE",
+    "REPORTS_READ_SALES",
+    "REPORTS_READ_PROFIT",
+    "REPORTS_READ_INVENTORY",
+    "REPORTS_EXPORT_PDF",
+    "AUDITLOGS_READ"
+  ],
+  SERVICE_ADVISOR: [
+    "CUSTOMERS_READ",
+    "CUSTOMERS_CREATE",
+    "CUSTOMERS_UPDATE",
+    "VEHICLES_READ",
+    "VEHICLES_CREATE",
+    "VEHICLES_UPDATE",
+    "WORKORDERS_READ_ALL",
+    "WORKORDERS_READ_SCHEDULED_POOL",
+    "WORKORDERS_CREATE",
+    "WORKORDERS_CREATE_HISTORICAL",
+    "WORKORDERS_UPDATE_STATUS",
+    "WORKORDERS_BILLING_EDIT",
+    "WORKORDERS_ASSIGN_EMPLOYEE",
+    "WORKORDERS_ADD_NOTES",
+    "WORKORDERS_ADD_ATTACHMENTS",
+    "TIMELOGS_CREATE_SELF",
+    "TIMELOGS_READ_SELF",
+    "PARTS_READ",
+    "SERVICES_READ",
+    "INVENTORY_ISSUE_TO_WORKORDER",
+    "INVENTORY_COUNTER_SALE",
+    "INVOICES_READ",
+    "INVOICES_CREATE",
+    "INVOICES_CLOSE",
+    "PAYMENTS_CREATE",
+    "PAYMENTS_READ",
+    "REPORTS_READ_SALES"
+  ],
+  INVENTORY_MANAGER: [
+    "PARTS_READ",
+    "PARTS_CREATE",
+    "PARTS_UPDATE",
+    "SERVICES_READ",
+    "INVENTORY_RECEIVE",
+    "INVENTORY_ADJUST",
+    "INVENTORY_ISSUE_TO_WORKORDER",
+    "INVENTORY_COUNTER_SALE",
+    "INVENTORY_PRICE_UPDATE",
+    "INVENTORY_REPORTS_READ",
+    "INVOICES_READ",
+    "PAYABLES_READ",
+    "PAYABLES_UPDATE"
+  ],
+  ACCOUNTANT: [
+    "CUSTOMERS_READ",
+    "VEHICLES_READ",
+    "WORKORDERS_READ_ALL",
+    "WORKORDERS_READ_SCHEDULED_POOL",
+    "PARTS_READ",
+    "SERVICES_READ",
+    "INVENTORY_REPORTS_READ",
+    "INVOICES_READ",
+    "INVOICES_CREATE",
+    "INVOICES_CLOSE",
+    "PAYMENTS_READ",
+    "EXPENSES_READ",
+    "PAYABLES_READ",
+    "REPORTS_READ_SALES",
+    "REPORTS_READ_PROFIT",
+    "REPORTS_READ_INVENTORY",
+    "REPORTS_EXPORT_PDF",
+    "AUDITLOGS_READ"
+  ],
+  AUDITOR: [
+    "USERS_READ",
+    "ROLES_READ",
+    "PERMISSIONS_READ",
+    "CUSTOMERS_READ",
+    "VEHICLES_READ",
+    "APPOINTMENTS_READ",
+    "WORKORDERS_READ_ALL",
+    "WORKORDERS_READ_ASSIGNED",
+    "WORKORDERS_READ_SCHEDULED_POOL",
+    "TIMELOGS_READ_SELF",
+    "TIMELOGS_READ_ALL",
+    "PARTS_READ",
+    "SERVICES_READ",
+    "INVENTORY_REPORTS_READ",
+    "INVOICES_READ",
+    "PAYMENTS_READ",
+    "EXPENSES_READ",
+    "PAYABLES_READ",
+    "REPORTS_READ_SALES",
+    "REPORTS_READ_PROFIT",
+    "REPORTS_READ_INVENTORY",
+    "REPORTS_EXPORT_PDF",
+    "AUDITLOGS_READ"
+  ]
+};
+
 export default function UsersPage() {
   const { session } = useAuth();
   const qc = useQueryClient();
   const canRead = session?.user?.permissions?.includes("USERS_READ");
   const canCreate = session?.user?.permissions?.includes("USERS_CREATE");
   const canUpdate = session?.user?.permissions?.includes("USERS_UPDATE");
+  const canDisable = session?.user?.permissions?.includes("USERS_DISABLE");
 
   const users = useQuery({
     queryKey: ["users"],
@@ -117,6 +275,23 @@ export default function UsersPage() {
     }
   });
 
+  const resendOtp = useMutation({
+    mutationFn: async (userId: string) => (await api.post(`/users/${userId}/resend-otp`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] });
+    }
+  });
+
+  const deleteUser = useMutation({
+    mutationFn: async (userId: string) => (await api.delete(`/users/${userId}`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] });
+      if (editingUserId) {
+        setEditingUserId(null);
+      }
+    }
+  });
+
   const updateUser = useMutation({
     mutationFn: async () => {
       if (!editingUserId) return;
@@ -136,6 +311,10 @@ export default function UsersPage() {
   });
 
   const cannotAccess = useMemo(() => !canRead && !canCreate, [canRead, canCreate]);
+  const createRolePermissions = useMemo(
+    () => roleDefaultPermissions[form.role as RoleKey] || [],
+    [form.role]
+  );
 
   const startEditing = (user: any) => {
     setEditingUserId(user._id);
@@ -191,18 +370,43 @@ export default function UsersPage() {
                     <p className="text-xs text-muted-foreground">
                       {u.email} | {u.role}
                     </p>
+                    <p className={`text-xs ${u.emailVerified ? "text-accent" : "text-primary"}`}>
+                      {u.emailVerified ? "Email verified" : "Email not verified"}
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="text-right">
                       <p className="text-xs text-muted-foreground">{(u.permissions || []).length} perms</p>
                       <p className={`text-xs ${u.isActive ? "text-accent" : "text-primary"}`}>{u.isActive ? "Active" : "Disabled"}</p>
                     </div>
+                    {!u.emailVerified && canCreate && (
+                      <button
+                        onClick={() => resendOtp.mutate(u._id)}
+                        className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
+                        disabled={resendOtp.isPending}
+                      >
+                        Resend OTP
+                      </button>
+                    )}
                     {canUpdate && (
                       <button
                         onClick={() => startEditing(u)}
                         className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
                       >
                         Edit
+                      </button>
+                    )}
+                    {canDisable && u.role !== "OWNER_ADMIN" && (
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Delete user ${u.email}? This cannot be undone.`)) {
+                            deleteUser.mutate(u._id);
+                          }
+                        }}
+                        className="text-xs px-2 py-1 rounded border border-primary text-primary hover:bg-primary/10"
+                        disabled={deleteUser.isPending}
+                      >
+                        Delete
                       </button>
                     )}
                   </div>
@@ -248,6 +452,10 @@ export default function UsersPage() {
                 </option>
               ))}
             </select>
+            <div className="rounded-lg border border-border bg-card px-3 py-2">
+              <p className="text-xs font-semibold text-foreground">Auto-selected permissions ({createRolePermissions.length})</p>
+              <p className="text-[11px] text-muted-foreground mt-1 line-clamp-4">{createRolePermissions.join(", ")}</p>
+            </div>
             <button
               disabled={!canCreate || create.isPending}
               onClick={() => create.mutate()}
@@ -255,6 +463,20 @@ export default function UsersPage() {
             >
               {create.isPending ? "Saving..." : "Create User"}
             </button>
+            {create.isSuccess && (
+              <p className="text-xs text-accent">
+                User created. Verification OTP sent to email.
+              </p>
+            )}
+            {create.isError && <p className="text-xs text-primary">{(create.error as any)?.message || "Create failed"}</p>}
+            {resendOtp.isSuccess && <p className="text-xs text-accent">OTP resent.</p>}
+            {resendOtp.isError && (
+              <p className="text-xs text-primary">{(resendOtp.error as any)?.message || "Resend failed"}</p>
+            )}
+            {deleteUser.isSuccess && <p className="text-xs text-accent">User deleted.</p>}
+            {deleteUser.isError && (
+              <p className="text-xs text-primary">{(deleteUser.error as any)?.message || "Delete failed"}</p>
+            )}
 
             {canUpdate && (
               <div className="border-t border-border pt-3 space-y-2">
@@ -295,7 +517,13 @@ export default function UsersPage() {
                 <select
                   disabled={!editingUserId}
                   value={editForm.role}
-                  onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
+                  onChange={(e) =>
+                    setEditForm({
+                      ...editForm,
+                      role: e.target.value,
+                      permissions: [...(roleDefaultPermissions[e.target.value as RoleKey] || [])]
+                    })
+                  }
                   className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
                 >
                   {roleOptions.map((r) => (

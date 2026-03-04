@@ -193,6 +193,88 @@ describe("Work order close -> invoice generation", () => {
     expect(totals).toBeCloseTo(200 + 2 * 60 + 50);
   });
 
+  test("advance reduces billing payment due without reducing invoice revenue total", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    const vehicleId = new mongoose.Types.ObjectId();
+    const userId = new mongoose.Types.ObjectId().toString();
+
+    const wo = await connection.model(WorkOrder.name).create({
+      customerId,
+      vehicleId,
+      status: "In Progress",
+      billableLaborAmount: mongoose.Types.Decimal128.fromString("500"),
+      advanceAmount: mongoose.Types.Decimal128.fromString("200"),
+    });
+
+    await service.updateBilling(
+      wo._id.toString(),
+      {
+        billableLaborAmount: 500,
+        otherCharges: [{ name: "Extra", amount: 100 }],
+      },
+      {
+        userId,
+        role: "OPS_MANAGER",
+        permissions: [Permissions.WORKORDERS_BILLING_EDIT],
+      }
+    );
+
+    const invoice = await connection.model(Invoice.name).findOne({ workOrderId: wo._id });
+    const payment = await connection.model(Payment.name).findOne({ invoiceId: invoice?._id });
+    const refreshed = await connection.model(WorkOrder.name).findById(wo._id);
+
+    expect(invoice).toBeTruthy();
+    expect(Number(invoice?.total?.toString() || 0)).toBeCloseTo(600);
+    expect(Number(payment?.amount?.toString() || 0)).toBeCloseTo(400);
+    expect(Number(refreshed?.advanceAppliedAmount?.toString() || 0)).toBeCloseTo(200);
+  });
+
+  test("historical backfill creates closed invoice with optional cost affecting cogs inputs", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    const vehicleId = new mongoose.Types.ObjectId();
+    const userId = new mongoose.Types.ObjectId().toString();
+
+    const dateIn = "2026-01-05T00:00:00.000Z";
+    const dateOut = "2026-01-06T00:00:00.000Z";
+
+    const wo = await service.create(
+      {
+        customerId,
+        vehicleId,
+        complaint: "Legacy entry from paper register",
+        isHistorical: true,
+        dateIn,
+        dateOut,
+        status: "Closed",
+        historicalBillAmount: 5000,
+        historicalCostAmount: 3200,
+      } as any,
+      {
+        userId,
+        role: "SERVICE_ADVISOR",
+        permissions: [
+          Permissions.WORKORDERS_CREATE,
+          Permissions.WORKORDERS_CREATE_HISTORICAL,
+          Permissions.WORKORDERS_BILLING_EDIT,
+        ],
+      } as any
+    );
+
+    const invoice = await connection.model(Invoice.name).findOne({ workOrderId: wo._id });
+    const payment = await connection.model(Payment.name).findOne({ invoiceId: invoice?._id });
+    const refreshed = await connection.model(WorkOrder.name).findById(wo._id);
+
+    expect(refreshed?.status).toBe("Closed");
+    expect(refreshed?.isHistorical).toBe(true);
+    expect(refreshed?.deliveredAt?.toISOString()).toBe(dateOut);
+    expect(invoice).toBeTruthy();
+    expect(Number(invoice?.total?.toString() || 0)).toBeCloseTo(5000);
+    expect(Number(payment?.amount?.toString() || 0)).toBeCloseTo(5000);
+    const otherLine = (invoice?.lineItems || []).find((li: any) => li.type === "OTHER");
+    expect(otherLine).toBeTruthy();
+    expect(Number(otherLine?.costAtTime?.toString() || 0)).toBeCloseTo(3200);
+  });
+
   test("reopening a closed work order clears deliveredAt", async () => {
     const customerId = new mongoose.Types.ObjectId();
     const vehicleId = new mongoose.Types.ObjectId();

@@ -22,7 +22,9 @@ type WorkOrder = {
   status?: string;
   vehicleId?: string;
   createdAt?: string;
+  dateIn?: string;
   deliveredAt?: string | null;
+  isHistorical?: boolean;
   billableLaborAmount?: number;
   partsUsed?: { sellingPriceAtTime?: number; qty?: number }[];
   servicesUsed?: { unitPriceAtTime?: number; qty?: number }[];
@@ -299,10 +301,13 @@ export default function WorkOrdersPage() {
                           </Link>
                           <p className="text-xs text-muted-foreground">WO #{wo._id}</p>
                           <p className="text-xs text-muted-foreground">Vehicle #{wo.vehicleId || "N/A"}</p>
-                          {wo.createdAt && (
+                          {(wo.dateIn || wo.createdAt) && (
                             <p className="text-[11px] text-muted-foreground">
-                              Created {new Date(wo.createdAt).toLocaleDateString()}
+                              Created {new Date(wo.dateIn || wo.createdAt || "").toLocaleDateString()}
                             </p>
+                          )}
+                          {wo.isHistorical && (
+                            <p className="text-[11px] text-accent">Historical entry</p>
                           )}
                           <p className="text-[11px] text-muted-foreground">
                             Date Out {wo.deliveredAt ? new Date(wo.deliveredAt).toLocaleDateString() : "--"}

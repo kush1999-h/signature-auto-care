@@ -15,6 +15,15 @@ export class WorkOrder {
   @Prop()
   complaint?: string;
 
+  @Prop({ trim: true, maxlength: 120 })
+  reference?: string;
+
+  @Prop({ default: 0, min: 0, type: MongooseSchema.Types.Decimal128 })
+  advanceAmount!: Types.Decimal128;
+
+  @Prop({ default: 0, min: 0, type: MongooseSchema.Types.Decimal128 })
+  advanceAppliedAmount!: Types.Decimal128;
+
   @Prop({ type: Number, min: 0, max: 100 })
   oilLevelPct?: number;
 
@@ -26,6 +35,15 @@ export class WorkOrder {
 
   @Prop({ type: Date, default: null })
   deliveredAt?: Date | null;
+
+  @Prop({ type: Date })
+  dateIn?: Date;
+
+  @Prop({ default: false })
+  isHistorical?: boolean;
+
+  @Prop({ trim: true, maxlength: 200 })
+  historicalSource?: string;
 
   @Prop({
     type: [
@@ -107,6 +125,7 @@ export class WorkOrder {
 export const WorkOrderSchema = SchemaFactory.createForClass(WorkOrder);
 WorkOrderSchema.index({ status: 1 });
 WorkOrderSchema.index({ deliveredAt: 1 });
+WorkOrderSchema.index({ dateIn: 1 });
 WorkOrderSchema.index({ "assignedEmployees.employeeId": 1 });
 
 function toNumber(val: unknown) {
@@ -121,6 +140,8 @@ function toNumber(val: unknown) {
 WorkOrderSchema.set("toJSON", {
   transform: (_doc, ret) => {
     ret.billableLaborAmount = toNumber(ret.billableLaborAmount);
+    ret.advanceAmount = toNumber(ret.advanceAmount);
+    ret.advanceAppliedAmount = toNumber(ret.advanceAppliedAmount);
     if (Array.isArray(ret.partsUsed)) {
       ret.partsUsed = ret.partsUsed.map((p: unknown) => {
         const part = p as { sellingPriceAtTime?: unknown; costAtTime?: unknown };

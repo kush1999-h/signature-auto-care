@@ -24,6 +24,8 @@ type FormState = {
   plate: string;
   vin: string;
   complaint: string;
+  reference: string;
+  advanceAmount: string;
   oilLevelPct: number;
 };
 
@@ -39,6 +41,8 @@ const initialForm: FormState = {
   plate: "",
   vin: "",
   complaint: "",
+  reference: "",
+  advanceAmount: "",
   oilLevelPct: 50,
 };
 
@@ -51,7 +55,18 @@ const steps = [
 export default function IntakePage() {
   const { session } = useAuth();
   const canCreateWO = session?.user?.permissions?.includes("WORKORDERS_CREATE");
+  const sessionRole = (session?.user as { role?: string } | undefined)?.role || "";
+  const canCreateHistorical =
+    Boolean(session?.user?.permissions?.includes("WORKORDERS_CREATE_HISTORICAL")) ||
+    ["OWNER_ADMIN", "OPS_MANAGER", "SERVICE_ADVISOR"].includes(sessionRole);
   const [form, setForm] = useState<FormState>(initialForm);
+  const [historicalMode, setHistoricalMode] = useState(false);
+  const [historicalDateIn, setHistoricalDateIn] = useState("");
+  const [historicalDateOut, setHistoricalDateOut] = useState("");
+  const [historicalStatus, setHistoricalStatus] = useState("Closed");
+  const [historicalBillAmount, setHistoricalBillAmount] = useState("");
+  const [historicalCostAmount, setHistoricalCostAmount] = useState("");
+  const [historicalSource, setHistoricalSource] = useState("");
   const [activeStep, setActiveStep] = useState<(typeof steps)[number]["value"]>("customer");
   const [searchPhone, setSearchPhone] = useState("");
   const debouncedSearchPhone = useDebounce(searchPhone, 300);
@@ -119,9 +134,26 @@ export default function IntakePage() {
         customerId,
         vehicleId,
         complaint: form.complaint,
-        status: "Scheduled",
+        reference: form.reference.trim() || undefined,
+        advanceAmount:
+          form.advanceAmount.trim() === ""
+            ? undefined
+            : Number(form.advanceAmount),
+        status: historicalMode ? historicalStatus : "Scheduled",
         assignedEmployees: [],
-        oilLevelPct: form.oilLevelPct
+        oilLevelPct: form.oilLevelPct,
+        isHistorical: historicalMode || undefined,
+        dateIn: historicalMode ? historicalDateIn : undefined,
+        dateOut: historicalMode && historicalDateOut ? historicalDateOut : undefined,
+        historicalBillAmount:
+          historicalMode && historicalBillAmount.trim() !== ""
+            ? Number(historicalBillAmount)
+            : undefined,
+        historicalCostAmount:
+          historicalMode && historicalCostAmount.trim() !== ""
+            ? Number(historicalCostAmount)
+            : undefined,
+        historicalSource: historicalMode ? historicalSource.trim() || undefined : undefined,
       });
       return workOrderRes.data;
     },
@@ -129,6 +161,13 @@ export default function IntakePage() {
       setForm(initialForm);
       setSearchPhone("");
       setSelectedCustomerId(null);
+      setHistoricalMode(false);
+      setHistoricalDateIn("");
+      setHistoricalDateOut("");
+      setHistoricalStatus("Closed");
+      setHistoricalBillAmount("");
+      setHistoricalCostAmount("");
+      setHistoricalSource("");
       setActiveStep("customer");
       showToast({
         title: "Work order created",
@@ -151,6 +190,37 @@ export default function IntakePage() {
     if (!form.plate.trim()) errors.plate = "Plate is required";
     if (!Number.isFinite(form.oilLevelPct)) errors.oilLevelPct = "Oil level is required";
     if (!form.complaint.trim()) errors.complaint = "Complaint is required";
+    if (form.reference.trim().length > 120) errors.reference = "Reference must be at most 120 characters";
+    if (form.advanceAmount.trim() !== "") {
+      const advance = Number(form.advanceAmount);
+      if (!Number.isFinite(advance) || advance < 0) errors.advanceAmount = "Advance must be a non-negative number";
+    }
+    if (historicalMode) {
+      if (!canCreateHistorical) {
+        errors.historicalMode = "You do not have permission for historical entries";
+      }
+      if (!historicalDateIn) {
+        errors.historicalDateIn = "Date in is required in historical mode";
+      }
+      if (historicalDateIn && historicalDateOut && new Date(historicalDateOut).getTime() < new Date(historicalDateIn).getTime()) {
+        errors.historicalDateOut = "Date out must be on/after Date in";
+      }
+      if (historicalBillAmount.trim() !== "") {
+        const bill = Number(historicalBillAmount);
+        if (!Number.isFinite(bill) || bill < 0) {
+          errors.historicalBillAmount = "Bill amount must be a non-negative number";
+        }
+      }
+      if (historicalCostAmount.trim() !== "") {
+        const cost = Number(historicalCostAmount);
+        if (!Number.isFinite(cost) || cost < 0) {
+          errors.historicalCostAmount = "Cost amount must be a non-negative number";
+        }
+        if (historicalBillAmount.trim() === "") {
+          errors.historicalBillAmount = "Bill amount is required if cost is provided";
+        }
+      }
+    }
     if (form.vehicleYear && !/^[0-9]{4}$/.test(form.vehicleYear)) errors.vehicleYear = "Use YYYY format";
     if (form.email && !/.+@.+/.test(form.email)) errors.email = "Invalid email format";
     return errors;
@@ -442,6 +512,115 @@ export default function IntakePage() {
                 />
                 {fieldErrors.complaint && <span className="text-[11px] text-red-400">{fieldErrors.complaint}</span>}
               </label>
+              <label className="text-sm text-muted-foreground">
+                Reference
+                <input
+                  placeholder="Reference (optional)"
+                  value={form.reference}
+                  onChange={(e) => setForm({ ...form, reference: e.target.value })}
+                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                />
+                {fieldErrors.reference && <span className="text-[11px] text-red-400">{fieldErrors.reference}</span>}
+              </label>
+              <label className="text-sm text-muted-foreground">
+                Advance received
+                <input
+                  placeholder="Advance amount (optional)"
+                  value={form.advanceAmount}
+                  onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })}
+                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                />
+                <span className="text-[11px] text-muted-foreground">
+                  Advance will be adjusted automatically during billing.
+                </span>
+                {fieldErrors.advanceAmount && <span className="text-[11px] text-red-400">{fieldErrors.advanceAmount}</span>}
+              </label>
+              {canCreateHistorical && (
+                <div className="rounded-lg border border-border p-3 space-y-2">
+                  <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={historicalMode}
+                      onChange={(e) => setHistoricalMode(e.target.checked)}
+                      className="h-4 w-4 accent-primary"
+                    />
+                    Historical entry (backfill old work order)
+                  </label>
+                  {historicalMode && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <label className="text-sm text-muted-foreground">
+                          Date in <span className="text-red-400">*</span>
+                          <input
+                            type="date"
+                            value={historicalDateIn}
+                            onChange={(e) => setHistoricalDateIn(e.target.value)}
+                            className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                          />
+                          {fieldErrors.historicalDateIn && <span className="text-[11px] text-red-400">{fieldErrors.historicalDateIn}</span>}
+                        </label>
+                        <label className="text-sm text-muted-foreground">
+                          Date out
+                          <input
+                            type="date"
+                            value={historicalDateOut}
+                            onChange={(e) => setHistoricalDateOut(e.target.value)}
+                            className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                          />
+                          {fieldErrors.historicalDateOut && <span className="text-[11px] text-red-400">{fieldErrors.historicalDateOut}</span>}
+                        </label>
+                      </div>
+                      <label className="text-sm text-muted-foreground">
+                        Status
+                        <select
+                          value={historicalStatus}
+                          onChange={(e) => setHistoricalStatus(e.target.value)}
+                          className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                        >
+                          <option value="Scheduled">Scheduled</option>
+                          <option value="In Progress">In Progress</option>
+                          <option value="Closed">Closed</option>
+                          <option value="Canceled">Canceled</option>
+                        </select>
+                      </label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <label className="text-sm text-muted-foreground">
+                          Legacy bill amount
+                          <input
+                            value={historicalBillAmount}
+                            onChange={(e) => setHistoricalBillAmount(e.target.value)}
+                            placeholder="Optional"
+                            className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                          />
+                          {fieldErrors.historicalBillAmount && <span className="text-[11px] text-red-400">{fieldErrors.historicalBillAmount}</span>}
+                        </label>
+                        <label className="text-sm text-muted-foreground">
+                          Legacy cost (optional)
+                          <input
+                            value={historicalCostAmount}
+                            onChange={(e) => setHistoricalCostAmount(e.target.value)}
+                            placeholder="Optional"
+                            className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                          />
+                          {fieldErrors.historicalCostAmount && <span className="text-[11px] text-red-400">{fieldErrors.historicalCostAmount}</span>}
+                        </label>
+                      </div>
+                      <label className="text-sm text-muted-foreground">
+                        Source note
+                        <input
+                          value={historicalSource}
+                          onChange={(e) => setHistoricalSource(e.target.value)}
+                          placeholder="Paper register / old system (optional)"
+                          className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                        />
+                      </label>
+                      <p className="text-[11px] text-muted-foreground">
+                        If bill and cost are provided, finance reports will include this backfilled job.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 onClick={onSubmit}
                 disabled={intake.isPending}

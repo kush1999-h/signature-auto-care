@@ -24,6 +24,15 @@ export class User {
   @Prop({ default: true })
   isActive!: boolean;
 
+  @Prop({ default: false })
+  emailVerified!: boolean;
+
+  @Prop()
+  emailVerificationOtpHash?: string;
+
+  @Prop()
+  emailVerificationOtpExpiresAt?: Date;
+
   @Prop()
   refreshTokenHash?: string;
 }
