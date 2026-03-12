@@ -33,8 +33,12 @@ type BillingBody = {
     nameAtTime?: string;
   }[];
   paymentMethod?: string;
+  paymentAmount?: number;
+  issueInvoice?: boolean;
+  closeWorkOrder?: boolean;
 };
 type PaymentBody = { method?: string; amount?: number | string };
+type MetaBody = { workOrderNumber?: string };
 type AssignBody = { assignedEmployees: { employeeId: string; roleType?: string }[] };
 type IssuePartBody = { partId: string; qty: number | string };
 type TimeLogBody = { clockInAt?: string; clockOutAt?: string };
@@ -117,9 +121,21 @@ export class WorkOrdersController {
         otherCharges: body.otherCharges,
         servicesUsed: body.servicesUsed,
         paymentMethod: body.paymentMethod,
+        paymentAmount: body.paymentAmount,
+        issueInvoice: body.issueInvoice,
+        closeWorkOrder: body.closeWorkOrder,
       },
       user
     );
+  }
+
+  @Post("work-orders/:id/issue-invoice")
+  @PermissionsRequired(Permissions.INVOICES_CREATE)
+  async issueInvoice(
+    @Param("id") id: string,
+    @CurrentUser() user: AuthUser
+  ) {
+    return this.workOrders.issueInvoice(id, user);
   }
 
   @Post("work-orders/:id/take-payment")
@@ -248,6 +264,21 @@ export class WorkOrdersController {
       message: body.message,
       authorId: resolveUserId(user),
     });
+  }
+
+  @Patch("work-orders/:id/meta")
+  @PermissionsRequired(Permissions.WORKORDERS_UPDATE_STATUS)
+  async updateMeta(
+    @Param("id") id: string,
+    @Body() body: MetaBody,
+    @CurrentUser() user: AuthUser
+  ) {
+    if (!body.workOrderNumber?.trim()) {
+      throw new BadRequestException("workOrderNumber is required");
+    }
+    return this.workOrders.updateMeta(id, {
+      workOrderNumber: body.workOrderNumber,
+    }, user);
   }
 
   // Bootstrap endpoint to create test work orders for development

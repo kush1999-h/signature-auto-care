@@ -22,6 +22,12 @@ class RefreshDto {
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  private ensureBootstrapEnabled() {
+    if (process.env.ALLOW_BOOTSTRAP_ENDPOINTS !== "true") {
+      throw new ForbiddenException("Forbidden");
+    }
+  }
+
   @Post("login")
   async login(@Body() body: LoginDto) {
     return this.authService.login(body.email, body.password);
@@ -55,6 +61,7 @@ export class AuthController {
   // Bootstrap login without password using a shared secret (for recovery/first login)
   @Post("bootstrap-login")
   async bootstrapLogin(@Body() body: { email: string; secret: string }) {
+    this.ensureBootstrapEnabled();
     const secret = process.env.BOOTSTRAP_SECRET;
     if (!secret || body.secret !== secret) {
       throw new ForbiddenException("Forbidden");

@@ -65,7 +65,7 @@ describe("ReportsService revenue coverage", () => {
     }
   });
 
-  test("counts revenue from closed work order invoices even when invoice.total is stale", async () => {
+  test("counts revenue from issued/paid work order invoices even when invoice.total is stale", async () => {
     const invoiceModel = connection.model(Invoice.name);
     const decimal = mongoose.Types.Decimal128.fromString;
 
@@ -73,7 +73,7 @@ describe("ReportsService revenue coverage", () => {
       {
         invoiceNumber: "INV-CS-1",
         type: InvoiceType.COUNTER_SALE,
-        status: InvoiceStatus.CLOSED,
+        status: InvoiceStatus.PAID,
         lineItems: [
           {
             type: "PART",
@@ -87,11 +87,13 @@ describe("ReportsService revenue coverage", () => {
         subtotal: decimal("4200"),
         tax: decimal("0"),
         total: decimal("4200"),
+        totalPaid: decimal("4200"),
+        outstandingAmount: decimal("0"),
       },
       {
         invoiceNumber: "INV-WO-1",
         type: InvoiceType.WORK_ORDER,
-        status: InvoiceStatus.CLOSED,
+        status: InvoiceStatus.ISSUED,
         lineItems: [
           {
             type: "PART",
@@ -113,6 +115,7 @@ describe("ReportsService revenue coverage", () => {
         subtotal: decimal("0"),
         tax: decimal("0"),
         total: decimal("0"),
+        outstandingAmount: decimal("4500"),
       },
     ]);
 

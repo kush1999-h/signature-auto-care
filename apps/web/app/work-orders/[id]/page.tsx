@@ -10,6 +10,7 @@ import Link from "next/link";
 import { Badge } from "../../../components/ui/badge";
 import { SegmentedControl } from "../../../components/ui/segmented-control";
 import { CurrencyInput } from "../../../components/ui/number-input";
+import { Input } from "../../../components/ui/input";
 import { Dialog } from "../../../components/ui/dialog";
 import { Textarea } from "../../../components/ui/textarea";
 import { Table, THead, TBody, TR, TH, TD } from "../../../components/ui/table";
@@ -23,6 +24,8 @@ import {
 } from "lucide-react";
 import { useToast } from "../../../components/ui/toast";
 import { useDebounce } from "../../../lib/use-debounce";
+import { PageHeader } from "../../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../../components/page-toolbar";
 
 type WorkOrderNote = {
   message: string;
@@ -62,6 +65,7 @@ type WorkOrderTimeLog = {
 type WorkOrderDetail = {
   workOrder?: {
     _id?: string;
+    workOrderNumber?: string;
     complaint?: string;
     reference?: string;
     status?: string;
@@ -79,7 +83,22 @@ type WorkOrderDetail = {
     otherCharges?: { name?: string; amount?: number; costAtTime?: number }[];
   };
   assignedEmployees?: { _id?: string; employeeId?: string; id?: string; name?: string; email?: string; role?: string }[];
-  invoice?: { invoiceNumber?: string; status?: string };
+  invoice?: {
+    _id?: string;
+    invoiceNumber?: string;
+    status?: string;
+    total?: number;
+    totalPaid?: number;
+    outstandingAmount?: number;
+    issuedAt?: string;
+  };
+  payments?: {
+    _id?: string;
+    method?: string;
+    amount?: number;
+    paidAt?: string;
+    note?: string;
+  }[];
   partsUsed?: WorkOrderPart[];
   servicesUsed?: WorkOrderService[];
   timeLogs?: WorkOrderTimeLog[];
@@ -98,6 +117,9 @@ type WorkOrderDetail = {
     advanceReceived?: number;
     advanceApplied?: number;
     amountDue?: number;
+    totalPaid?: number;
+    outstandingAmount?: number;
+    overpayment?: number;
   };
   customer?: { name?: string; phone?: string; email?: string };
   vehicle?: { make?: string; model?: string; year?: string | number; plate?: string; vin?: string };
@@ -112,6 +134,13 @@ type WorkOrderDetail = {
     assignees?: { id: string; name?: string; role?: string; roleType?: string }[];
     autoAssigned?: boolean;
   }[];
+  visitSummary?: {
+    vehicleVisitCount?: number;
+    vehicleFirstVisit?: string;
+    vehicleLastVisit?: string;
+    customerVisitCount?: number;
+    customerDistinctVehicles?: number;
+  };
 };
 
 type EmployeeLite = { _id?: string; name?: string; email?: string; role?: string; employeeId?: string; id?: string };
@@ -262,6 +291,8 @@ export default function WorkOrderDetailPage() {
       canIssue: p.includes("INVENTORY_ISSUE_TO_WORKORDER"),
       canAddNotes: p.includes("WORKORDERS_ADD_NOTES"),
       canEditBilling: p.includes("WORKORDERS_BILLING_EDIT"),
+      canCreateInvoice: p.includes("INVOICES_CREATE"),
+      canTakePayment: p.includes("PAYMENTS_CREATE") || p.includes("INVOICES_CLOSE"),
       canReadServices: p.includes("SERVICES_READ"),
       canReadAllLogs: p.includes("TIMELOGS_READ_ALL"),
       canReadSelfLogs: p.includes("TIMELOGS_READ_SELF"),
@@ -275,7 +306,9 @@ export default function WorkOrderDetailPage() {
   });
 
   const canEditBilling = perms.canEditBilling;
-  const statusOptions = ["Scheduled", "In Progress", "Closed", "Canceled"];
+  const [activeSection, setActiveSection] = useState<
+    "overview" | "billing" | "payments" | "activity" | "inventory"
+  >("overview");
 
   const statusMutation = useMutation({
     mutationFn: (payload: { status: string; note?: string }) =>
@@ -316,8 +349,10 @@ export default function WorkOrderDetailPage() {
   >([{ name: "", amount: "", costAtTime: "" }]);
   const [serviceRows, setServiceRows] = useState<
     { serviceId: string; qty: string; unitPriceAtTime: string; unitCostAtTime: string; nameAtTime: string }[]
-  >([{ serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" }]);
+  >([]);
   const [paymentMethod, setPaymentMethod] = useState("CASH");
+  const [paymentAmountInput, setPaymentAmountInput] = useState("");
+  const [workOrderNumberInput, setWorkOrderNumberInput] = useState("");
   const [billingError, setBillingError] = useState("");
   const [laborError, setLaborError] = useState<string | null>(null);
   const [chargeErrors, setChargeErrors] = useState<Record<number, string>>({});
@@ -347,6 +382,7 @@ export default function WorkOrderDetailPage() {
   }, [perms.canReadAllLogs]);
 
   const canIssueHere = perms.canIssue;
+  const canOverrideClosedBilling = perms.role === "OWNER_ADMIN";
 
   const partSearchQuery = useQuery<{ items?: PartSearchItem[] }>({
     queryKey: ["part-search", debouncedPartSearch],
@@ -389,10 +425,36 @@ export default function WorkOrderDetailPage() {
         nameAtTime?: string;
       }[];
       paymentMethod?: string;
+      paymentAmount?: number;
+      issueInvoice?: boolean;
+      closeWorkOrder?: boolean;
     }) => api.patch(`/work-orders/${id}/billing`, payload),
     onSuccess: () => {
       setBillingError("");
+      setPaymentAmountInput("");
       qc.invalidateQueries({ queryKey: ["work-order-detail", id] });
+    },
+  });
+
+  const workOrderNumberMutation = useMutation({
+    mutationFn: (payload: { workOrderNumber: string }) =>
+      api.patch(`/work-orders/${id}/meta`, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["work-order-detail", id] });
+      showToast({
+        title: "Work order number updated",
+        variant: "success",
+      });
+    },
+    onError: (err: unknown) => {
+      const message =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        "Unable to update work order number.";
+      showToast({
+        title: "Update failed",
+        description: String(message),
+        variant: "error",
+      });
     },
   });
 
@@ -410,6 +472,7 @@ export default function WorkOrderDetailPage() {
   useEffect(() => {
     if (!detail.data?.workOrder) return;
     const wo = detail.data.workOrder;
+    setWorkOrderNumberInput(wo.workOrderNumber || "");
     const laborValue = toNumeric(wo.billableLaborAmount);
     setLaborInput(
       laborValue > 0 ? String(laborValue) : ""
@@ -430,11 +493,7 @@ export default function WorkOrderDetailPage() {
         toNumeric(s?.unitCostAtTime) > 0 ? String(toNumeric(s?.unitCostAtTime)) : "",
       nameAtTime: s?.nameAtTime || "",
     }));
-    setServiceRows(
-      services.length
-        ? services
-        : [{ serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" }]
-    );
+    setServiceRows(services);
     setSelectedAssignees(
       (detail.data.assignedEmployees || [])
         .map((a) => {
@@ -509,7 +568,8 @@ export default function WorkOrderDetailPage() {
     [activeLogs]
   );
 
-  const financials = detail.data?.financials || calculateFinancials(wo, partsUsed, servicesUsed);
+  const financials: NonNullable<WorkOrderDetail["financials"]> =
+    detail.data?.financials || calculateFinancials(wo, partsUsed, servicesUsed);
   const parseAmount = (val: string) => {
     if (val.trim() === "") return 0;
     const num = Number(val);
@@ -536,17 +596,23 @@ export default function WorkOrderDetailPage() {
   const draftGrandTotal = draftSubtotal + taxPlaceholder;
   const advanceReceived = Number(wo?.advanceAmount || financials.advanceReceived || 0);
   const advanceAppliedDraft = Math.min(advanceReceived, draftGrandTotal);
-  const draftAmountDue = Math.max(
-    draftGrandTotal - advanceAppliedDraft,
-    0
-  );
-  const billingLocked = wo?.status === "Closed";
+  const paymentCollectedDraft = (() => {
+    const parsed = parseAmount(paymentAmountInput);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  })();
+  const draftAmountDueBeforePayment = Math.max(draftGrandTotal - advanceAppliedDraft, 0);
+  const draftAmountDue = Math.max(draftAmountDueBeforePayment - paymentCollectedDraft, 0);
+  const closeBlockedByDue = draftAmountDue > 0.0001;
+  const billingLocked = wo?.status === "Closed" && !canOverrideClosedBilling;
   const billingDisabledReason = !canEditBilling
     ? "Missing billing edit permission."
     : billingLocked
-    ? "Work order already closed."
+    ? "Only owner admin can edit closed work orders."
     : undefined;
-  const billingDisabled = billingLocked || !canEditBilling || billingMutation.isPending;
+  const billingDisabled =
+    billingLocked ||
+    !canEditBilling ||
+    billingMutation.isPending;
 
   const partTimestamp = (part: WorkOrderPart) =>
     new Date(part.issuedAt || part.updatedAt || part.createdAt || 0).getTime();
@@ -607,22 +673,20 @@ export default function WorkOrderDetailPage() {
       { serviceId: "", qty: "1", unitPriceAtTime: "", unitCostAtTime: "", nameAtTime: "" },
     ]);
   const removeServiceRow = (idx: number) =>
-    setServiceRows((rows) =>
-      rows.length === 1 ? rows : rows.filter((_, i) => i !== idx)
-    );
+    setServiceRows((rows) => rows.filter((_, i) => i !== idx));
   const serviceCatalogById = useMemo(() => {
     const map = new Map<string, ServiceCatalogItem>();
     (servicesCatalogQuery.data || []).forEach((item) => map.set(item._id, item));
     return map;
   }, [servicesCatalogQuery.data]);
 
-  const handleBillingSave = () => {
+  const submitBilling = (options?: { issueInvoice?: boolean; closeWorkOrder?: boolean }) => {
     if (!canEditBilling) {
       setBillingError("Missing billing edit permission.");
       return;
     }
-    if (billingLocked) {
-      setBillingError("Complete work order first.");
+    if (billingLocked && !canOverrideClosedBilling) {
+      setBillingError("Only owner admin can edit closed billing.");
       return;
     }
     setBillingError("");
@@ -714,6 +778,10 @@ export default function WorkOrderDetailPage() {
     setChargeErrors(nextChargeErrors);
     setServiceErrors(nextServiceErrors);
     if (hasErrors) return;
+    if (options?.closeWorkOrder && closeBlockedByDue) {
+      setBillingError("Full payment is required before closing this work order.");
+      return;
+    }
 
     billingMutation.mutate(
       {
@@ -721,11 +789,18 @@ export default function WorkOrderDetailPage() {
         otherCharges: normalizedCharges,
         servicesUsed: normalizedServices,
         paymentMethod,
+        paymentAmount: paymentCollectedDraft > 0 ? paymentCollectedDraft : undefined,
+        issueInvoice: options?.issueInvoice,
+        closeWorkOrder: options?.closeWorkOrder,
       },
       {
         onSuccess: () => {
           showToast({
-            title: "Billing updated",
+            title: options?.closeWorkOrder
+              ? "Billing saved and work order closed"
+              : options?.issueInvoice
+              ? "Billing saved and invoice issued"
+              : "Billing draft saved",
             description: (
               <a className="underline" href={`/work-orders/${workOrderId}`}>
                 View updated work order
@@ -737,6 +812,47 @@ export default function WorkOrderDetailPage() {
       }
     );
   };
+
+  const handleBillingSave = () => submitBilling();
+  const handleIssueInvoice = () => submitBilling({ issueInvoice: true });
+  const handleCloseWorkOrder = () => submitBilling({ issueInvoice: true, closeWorkOrder: true });
+  const nextActions = (() => {
+    if (!perms.canUpdateStatus) return [];
+    if (wo?.status === "Scheduled") {
+      return [{ label: "Start work", onClick: () => statusMutation.mutate({ status: "In Progress" }), tone: "primary" }];
+    }
+    if (wo?.status === "In Progress") {
+      return [
+        {
+          label: "Cancel",
+          onClick: () => {
+            setCancelDialogOpen(true);
+            setCancelError("");
+          },
+          tone: "muted",
+        },
+        {
+          label: closeBlockedByDue ? "Collect full payment" : "Close work order",
+          onClick: () => {
+            setActiveSection("billing");
+            if (closeBlockedByDue) {
+              setPaymentAmountInput(draftAmountDueBeforePayment ? String(draftAmountDueBeforePayment) : "");
+              setBillingError("Full payment is required before closing this work order.");
+              return;
+            }
+            handleCloseWorkOrder();
+          },
+          tone: "primary",
+        },
+      ];
+    }
+    if (wo?.status === "Closed" && Number(detail.data?.invoice?.outstandingAmount || 0) > 0) {
+      return [{ label: "Record payment", onClick: () => setActiveSection("payments"), tone: "primary" }];
+    }
+    return [];
+  })();
+  const isSectionVisible = (...sections: typeof activeSection[]) =>
+    sections.includes(activeSection) || activeSection === "overview";
 
   if (detail.isLoading) {
     return (
@@ -750,107 +866,191 @@ export default function WorkOrderDetailPage() {
 
   return (
     <Shell>
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between mb-6">
-        <div className="space-y-1">
-          <p className="text-xs text-muted-foreground">Work Order</p>
-          <h1 className="text-xl font-semibold text-foreground">{wo?._id}</h1>
-          <p className="text-muted-foreground text-sm">
-            {wo?.complaint || "General service"}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Reference: {wo?.reference?.trim() ? wo.reference : "--"}
-          </p>
-          <div className="text-xs text-muted-foreground space-y-1">
-            <p>Created: {formatDateTime(wo?.dateIn || wo?.createdAt)}</p>
-            <p>Date Out: {wo?.deliveredAt ? formatDateTime(wo.deliveredAt) : "--"}</p>
-            {wo?.isHistorical && (
-              <p>
-                Historical entry
-                {wo?.historicalSource ? ` | Source: ${wo.historicalSource}` : ""}
-              </p>
-            )}
+      <PageHeader
+        title={wo?.workOrderNumber || wo?._id || "Work Order"}
+        description={wo?.complaint || "General service"}
+        badge={<StatusBadge status={wo?.status} />}
+        meta={
+          <>
+            <span>Date in {formatDateTime(wo?.dateIn || wo?.createdAt)}</span>
+            <span>Date out {wo?.deliveredAt ? formatDateTime(wo.deliveredAt) : "--"}</span>
+            <span>Reference {wo?.reference?.trim() ? wo.reference : "--"}</span>
+            {wo?.isHistorical && <span>Historical{wo?.historicalSource ? ` | ${wo.historicalSource}` : ""}</span>}
+          </>
+        }
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            {nextActions.map((action) => (
+              <button
+                key={action.label}
+                onClick={action.onClick}
+                className={`text-xs px-3 py-2 rounded font-semibold disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${
+                  action.tone === "muted"
+                    ? "bg-muted hover:bg-border"
+                    : "bg-primary/80 hover:bg-primary text-foreground"
+                }`}
+                disabled={statusMutation.isPending || billingMutation.isPending}
+              >
+                {action.label}
+              </button>
+            ))}
           </div>
-          {(detail.data?.audit?.createdBy || detail.data?.audit?.billedBy) && (
-            <div className="text-xs text-muted-foreground space-y-1">
-              {detail.data?.audit?.createdBy && (
-                <p>
-                  Created by: {detail.data.audit.createdBy.name || "Unknown"}
-                  {detail.data.audit.createdBy.role ? ` (${detail.data.audit.createdBy.role})` : ""}
-                  {detail.data.audit.createdBy.at ? ` | ${formatDateTime(detail.data.audit.createdBy.at)}` : ""}
-                </p>
-              )}
-              {detail.data?.audit?.billedBy && (
-                <p>
-                  Billed by: {detail.data.audit.billedBy.name || "Unknown"}
-                  {detail.data.audit.billedBy.role ? ` (${detail.data.audit.billedBy.role})` : ""}
-                  {detail.data.audit.billedBy.at ? ` | ${formatDateTime(detail.data.audit.billedBy.at)}` : ""}
-                </p>
-              )}
+        }
+      />
+
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-card/40 p-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p className="font-semibold text-foreground">Customer</p>
+                <p>{detail.data?.customer?.name || "--"}</p>
+                <p>{detail.data?.customer?.phone || "--"}</p>
+                {detail.data?.customer?.email && <p>{detail.data.customer.email}</p>}
+              </div>
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p className="font-semibold text-foreground">Vehicle</p>
+                <p>{[detail.data?.vehicle?.make, detail.data?.vehicle?.model, detail.data?.vehicle?.year].filter(Boolean).join(" ") || "--"}</p>
+                <p>Plate {detail.data?.vehicle?.plate || "--"}</p>
+                <p>VIN {detail.data?.vehicle?.vin || "--"}</p>
+              </div>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p className="font-semibold text-foreground">Operational summary</p>
+                <p>Assigned {assigned.length === 0 ? "Unassigned" : assigned.map((a) => a.name || a.email).join(", ")}</p>
+                {detail.data?.visitSummary && (
+                  <div className="rounded-lg border border-border bg-background/40 px-3 py-2 text-[11px]">
+                    <p className="font-semibold text-foreground">Returning vehicle</p>
+                    <p>Same vehicle visits {detail.data.visitSummary.vehicleVisitCount || 0}</p>
+                    <p>Customer visits {detail.data.visitSummary.customerVisitCount || 0}</p>
+                    <p>First {formatDateTime(detail.data.visitSummary.vehicleFirstVisit)} | Last {formatDateTime(detail.data.visitSummary.vehicleLastVisit)}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {canOverrideClosedBilling && (
+            <div className="rounded-xl border border-border bg-card/40 p-4 max-w-xl">
+              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Edit Work Order Number</p>
+              <div className="mt-2 flex gap-2">
+                <Input
+                  value={workOrderNumberInput}
+                  onChange={(e) => setWorkOrderNumberInput(e.target.value)}
+                  placeholder="WO-2026-001"
+                  disabled={workOrderNumberMutation.isPending}
+                />
+                <button
+                  type="button"
+                  className="text-xs px-3 py-2 rounded bg-muted hover:bg-border disabled:opacity-60"
+                  disabled={
+                    workOrderNumberMutation.isPending ||
+                    !workOrderNumberInput.trim() ||
+                    workOrderNumberInput.trim() === (wo?.workOrderNumber || "")
+                  }
+                  onClick={() =>
+                    workOrderNumberMutation.mutate({
+                      workOrderNumber: workOrderNumberInput.trim(),
+                    })
+                  }
+                >
+                  {workOrderNumberMutation.isPending ? "Saving..." : "Save"}
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-muted-foreground">Must be unique across all work orders.</p>
             </div>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-3 justify-start xl:justify-end">
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 min-w-[220px]">
-            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-              Total
-            </p>
-            <p className="text-xl font-semibold text-foreground">
-              Tk. {formatMoney(financials.total)}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              Labor Tk. {formatMoney(financials.labor)} | Parts Tk.{" "}
-              {formatMoney(financials.partsTotal)} | Services Tk.{" "}
-              {formatMoney(financials.servicesTotal)} | Other Tk.{" "}
-              {formatMoney(financials.otherTotal)}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              Advance Tk. {formatMoney(financials.advanceApplied)} /{" "}
-              {formatMoney(financials.advanceReceived)} | Due Tk.{" "}
-              {formatMoney(financials.amountDue)}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge status={wo?.status} />
-            <div className="flex flex-wrap gap-2">
-              {statusOptions.map((s) => {
-                const disabled = statusMutation.isPending || !perms.canUpdateStatus;
-                return (
-                  <button
-                    key={s}
-                    onClick={() => {
-                      if (s === "Canceled") {
-                        setCancelDialogOpen(true);
-                        setCancelError("");
-                        return;
-                      }
-                      statusMutation.mutate({ status: s });
-                    }}
-                    className="text-xs px-2 py-1 rounded bg-muted hover:bg-border disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                    disabled={disabled}
-                    title={
-                      !perms.canUpdateStatus
-                        ? "You do not have permission to update status."
-                        : undefined
-                    }
-                  >
-                    {statusMutation.isPending ? "Updating..." : s}
-                  </button>
-                );
-              })}
+
+        <div className="rounded-xl border border-border bg-muted/30 px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Charge summary</p>
+          <p className="text-xl font-semibold text-foreground">Tk. {formatMoney(financials.total)}</p>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+            <div className="rounded-lg border border-border/60 bg-background/30 px-3 py-2">
+              <p className="uppercase tracking-wide text-muted-foreground">Labor</p>
+              <p className="font-semibold text-foreground">Tk. {formatMoney(financials.labor)}</p>
+            </div>
+            <div className="rounded-lg border border-border/60 bg-background/30 px-3 py-2">
+              <p className="uppercase tracking-wide text-muted-foreground">Parts</p>
+              <p className="font-semibold text-foreground">Tk. {formatMoney(financials.partsTotal)}</p>
+            </div>
+            <div className="rounded-lg border border-border/60 bg-background/30 px-3 py-2">
+              <p className="uppercase tracking-wide text-muted-foreground">Services</p>
+              <p className="font-semibold text-foreground">Tk. {formatMoney(financials.servicesTotal)}</p>
+            </div>
+            <div className="rounded-lg border border-border/60 bg-background/30 px-3 py-2">
+              <p className="uppercase tracking-wide text-muted-foreground">Other charges</p>
+              <p className="font-semibold text-foreground">Tk. {formatMoney(financials.otherTotal)}</p>
             </div>
           </div>
         </div>
       </div>
 
+      <div className="sticky top-0 z-10 mb-4 rounded-xl border border-border bg-background/95 backdrop-blur">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 px-4 py-3">
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Total billed</p>
+            <p className="font-semibold text-foreground">Tk. {formatMoney(detail.data?.invoice?.total ?? financials.total)}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Advance applied</p>
+            <p className="font-semibold text-foreground">Tk. {formatMoney(financials.advanceApplied)}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Total paid</p>
+            <p className="font-semibold text-foreground">Tk. {formatMoney(detail.data?.invoice?.totalPaid ?? financials.totalPaid)}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Outstanding due</p>
+            <p className="font-semibold text-[var(--warning-text)]">Tk. {formatMoney(detail.data?.invoice?.outstandingAmount ?? financials.outstandingAmount)}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Invoice status</p>
+            <p className="font-semibold text-foreground">{detail.data?.invoice?.status || "Draft"}</p>
+          </div>
+        </div>
+        <div className="border-t border-border px-4 py-2">
+          <PageToolbar className="p-0 bg-transparent">
+            <PageToolbarSection>
+              <SegmentedControl
+                aria-label="Work order sections"
+                options={[
+                  { value: "overview", label: "Overview" },
+                  { value: "billing", label: "Billing" },
+                  { value: "payments", label: "Payments" },
+                  { value: "activity", label: "Activity" },
+                  { value: "inventory", label: "Inventory / Parts" },
+                ]}
+                value={activeSection}
+                onChange={(val) => setActiveSection(val as typeof activeSection)}
+              />
+            </PageToolbarSection>
+            <PageToolbarSection align="end">
+              <div className="text-xs text-muted-foreground">
+                {activeSection === "billing"
+                  ? "Review charges, collect payment, then issue or close."
+                  : activeSection === "payments"
+                  ? "Use this view to review what has already been collected."
+                  : activeSection === "inventory"
+                  ? "Issued parts, service lines, and extra charges."
+                  : activeSection === "activity"
+                  ? "Logs, notes, and audit trail."
+                  : "Customer, vehicle, and invoice context."}
+              </div>
+            </PageToolbarSection>
+          </PageToolbar>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="glass p-4 rounded-xl space-y-3 lg:col-span-2">
-          <div className="flex flex-wrap gap-3 text-sm text-white/70">
+          <div className={`space-y-4 text-sm text-muted-foreground ${isSectionVisible("overview", "payments", "activity") ? "" : "hidden"}`}>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <div>
               <p className="text-foreground font-semibold">Customer</p>
               <p>{detail.data?.customer?.name}</p>
-              <p className="text-white/60">{detail.data?.customer?.phone}</p>
+              <p className="text-muted-foreground">{detail.data?.customer?.phone}</p>
               {detail.data?.customer?.email && (
-                <p className="text-white/60">{detail.data.customer.email}</p>
+                <p className="text-muted-foreground">{detail.data.customer.email}</p>
               )}
             </div>
             <div>
@@ -859,16 +1059,33 @@ export default function WorkOrderDetailPage() {
                 {detail.data?.vehicle?.make} {detail.data?.vehicle?.model}{" "}
                 {detail.data?.vehicle?.year || ""}
               </p>
-              <p className="text-white/60">
+              <p className="text-muted-foreground">
                 Plate: {detail.data?.vehicle?.plate || "--"}
               </p>
-              <p className="text-white/60">
+              <p className="text-muted-foreground">
                 VIN: {detail.data?.vehicle?.vin || "--"}
               </p>
+              {detail.data?.visitSummary && (
+                <div className="mt-2 rounded-lg border border-border bg-card/40 px-3 py-2 text-[11px] text-muted-foreground">
+                  <p className="font-semibold text-foreground">Returning vehicle</p>
+                  <p>
+                    Same vehicle visits: {detail.data.visitSummary.vehicleVisitCount || 0}
+                    {" | "}Customer visits: {detail.data.visitSummary.customerVisitCount || 0}
+                  </p>
+                  <p>
+                    First {formatDateTime(detail.data.visitSummary.vehicleFirstVisit)}
+                    {" | "}Last {formatDateTime(detail.data.visitSummary.vehicleLastVisit)}
+                  </p>
+                  <p>
+                    Customer has used {detail.data.visitSummary.customerDistinctVehicles || 0} vehicle
+                    {(detail.data.visitSummary.customerDistinctVehicles || 0) === 1 ? "" : "s"} here.
+                  </p>
+                </div>
+              )}
             </div>
             <div>
               <p className="text-foreground font-semibold">Assigned</p>
-              <div className="text-white/60">
+              <div className="text-muted-foreground">
                 {assigned.length === 0 && "Unassigned"}
                 {assigned.map((a) => (
                   <p key={a._id || a.email}>
@@ -880,12 +1097,32 @@ export default function WorkOrderDetailPage() {
             {detail.data?.invoice && (
               <div>
                 <p className="text-foreground font-semibold">Invoice</p>
-                <p className="text-white/60">
+              <p className="text-muted-foreground">
                   {detail.data.invoice.invoiceNumber}
                 </p>
-                <p className="text-white/60">
+                <p className="text-muted-foreground">
                   Status: {detail.data.invoice.status}
                 </p>
+                <p className="text-muted-foreground">
+                  Total: Tk. {formatMoney(detail.data.invoice.total)}
+                </p>
+                <p className="text-muted-foreground">
+                  Paid: Tk. {formatMoney(detail.data.invoice.totalPaid)}
+                </p>
+                <p className="text-muted-foreground">
+                  Due: Tk. {formatMoney(detail.data.invoice.outstandingAmount)}
+                </p>
+                {detail.data.payments && detail.data.payments.length > 0 && (
+                  <div className="mt-2 space-y-1 text-muted-foreground">
+                    <p className="font-semibold text-foreground">Payment history</p>
+                    {detail.data.payments.map((payment) => (
+                      <p key={payment._id || `${payment.paidAt}-${payment.amount}`}>
+                        {formatDateTime(payment.paidAt)} | {payment.method || "--"} | Tk.{" "}
+                        {formatMoney(payment.amount)}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {(auditTrail.length > 0 ||
@@ -895,7 +1132,7 @@ export default function WorkOrderDetailPage() {
               <div>
                 <p className="text-foreground font-semibold">Activity</p>
                 {auditTrail.length > 0 ? (
-                  <div className="space-y-1 text-white/60">
+                  <div className="space-y-1 text-muted-foreground">
                     {auditTrail.map((entry, idx) => {
                       const actorName = entry.by?.name || "Unknown";
                       const actorRole = entry.by?.role ? ` (${entry.by.role})` : "";
@@ -944,21 +1181,21 @@ export default function WorkOrderDetailPage() {
                 ) : (
                   <>
                     {detail.data?.audit?.createdBy && (
-                      <p className="text-white/60">
+                      <p className="text-muted-foreground">
                         Intake: {detail.data.audit.createdBy.name || "Unknown"}{" "}
                         {detail.data.audit.createdBy.role ? `(${detail.data.audit.createdBy.role})` : ""}
                         {detail.data.audit.createdBy.at ? ` | ${formatDateTime(detail.data.audit.createdBy.at)}` : ""}
                       </p>
                     )}
                     {detail.data?.audit?.billingUpdatedBy && (
-                      <p className="text-white/60">
+                      <p className="text-muted-foreground">
                         Billing update: {detail.data.audit.billingUpdatedBy.name || "Unknown"}{" "}
                         {detail.data.audit.billingUpdatedBy.role ? `(${detail.data.audit.billingUpdatedBy.role})` : ""}
                         {detail.data.audit.billingUpdatedBy.at ? ` | ${formatDateTime(detail.data.audit.billingUpdatedBy.at)}` : ""}
                       </p>
                     )}
                     {detail.data?.audit?.billedBy && (
-                      <p className="text-white/60">
+                      <p className="text-muted-foreground">
                         Billing submitted: {detail.data.audit.billedBy.name || "Unknown"}{" "}
                         {detail.data.audit.billedBy.role ? `(${detail.data.audit.billedBy.role})` : ""}
                         {detail.data.audit.billedBy.at ? ` | ${formatDateTime(detail.data.audit.billedBy.at)}` : ""}
@@ -968,9 +1205,10 @@ export default function WorkOrderDetailPage() {
                 )}
               </div>
             )}
+            </div>
           </div>
 
-          <div className="mt-4">
+          <div className={`mt-4 ${isSectionVisible("inventory") ? "" : "hidden"}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
               <p className="font-semibold text-foreground">Parts Used</p>
               <label className="text-xs text-muted-foreground flex items-center gap-1">
@@ -1030,7 +1268,7 @@ export default function WorkOrderDetailPage() {
             </div>
           </div>
 
-          <div className="mt-4">
+          <div className={`mt-4 ${isSectionVisible("inventory") ? "" : "hidden"}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
               <p className="font-semibold text-foreground">Services Used</p>
             </div>
@@ -1076,7 +1314,7 @@ export default function WorkOrderDetailPage() {
             </div>
           </div>
 
-          <div className="mt-4">
+          <div className={`mt-4 ${isSectionVisible("inventory") ? "" : "hidden"}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
               <p className="font-semibold text-foreground">Other Charges</p>
             </div>
@@ -1119,7 +1357,7 @@ export default function WorkOrderDetailPage() {
             </div>
           </div>
 
-          <div className="mt-4 space-y-2">
+          <div className={`mt-4 space-y-2 ${isSectionVisible("activity") ? "" : "hidden"}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="font-semibold text-foreground">Time Logs</p>
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -1242,7 +1480,7 @@ export default function WorkOrderDetailPage() {
             </div>
           </div>
 
-          <div className="mt-4">
+          <div className={`mt-4 ${isSectionVisible("activity") ? "" : "hidden"}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
               <p className="font-semibold text-foreground">Notes</p>
               <label className="text-xs text-muted-foreground flex items-center gap-1">
@@ -1314,18 +1552,36 @@ export default function WorkOrderDetailPage() {
         <div className="space-y-4">
           {/* Billing view */}
           {
-            <div className="glass p-4 rounded-xl space-y-3">
+            <div className={`glass p-4 rounded-xl space-y-3 ${isSectionVisible("billing", "payments") ? "" : "hidden"}`}>
               <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-foreground">
                   Billing & Charges
                 </p>
                 <span className="text-xs text-muted-foreground">
-                  Draft total Tk. {formatMoney(draftGrandTotal)}
+                  Current total billed Tk. {formatMoney(draftGrandTotal)}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Submit billing to close the work order and invoice.
+                Save charges first, then issue invoice, collect payment, and close only when the due reaches zero.
               </p>
+              <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-background/40 p-3 text-xs md:grid-cols-4">
+                <div>
+                  <p className="uppercase tracking-wide text-muted-foreground">Total billed</p>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(draftGrandTotal)}</p>
+                </div>
+                <div>
+                  <p className="uppercase tracking-wide text-muted-foreground">Advance applied</p>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(advanceAppliedDraft)}</p>
+                </div>
+                <div>
+                  <p className="uppercase tracking-wide text-muted-foreground">Payment now</p>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(paymentCollectedDraft)}</p>
+                </div>
+                <div>
+                  <p className="uppercase tracking-wide text-muted-foreground">Outstanding due</p>
+                  <p className="font-semibold text-[var(--warning-text)]">Tk. {formatMoney(draftAmountDue)}</p>
+                </div>
+              </div>
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">Payment method</p>
                 <select
@@ -1350,6 +1606,60 @@ export default function WorkOrderDetailPage() {
                 </p>
               </div>
               <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Payment collected now</p>
+                <CurrencyInput
+                  value={paymentAmountInput}
+                  onChange={setPaymentAmountInput}
+                  placeholder="0"
+                  allowEmpty
+                  min={0}
+                  disabled={billingDisabled || !perms.canTakePayment}
+                  title={
+                    !perms.canTakePayment
+                      ? "Missing payment permission."
+                      : billingDisabledReason
+                  }
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPaymentAmountInput(
+                        draftAmountDueBeforePayment > 0 ? String(draftAmountDueBeforePayment) : ""
+                      )
+                    }
+                    disabled={billingDisabled || !perms.canTakePayment}
+                    className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    Full due
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentAmountInput("")}
+                    disabled={billingDisabled || !perms.canTakePayment}
+                    className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    Custom amount
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentAmountInput("")}
+                    disabled={billingDisabled || !perms.canTakePayment}
+                    className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Remaining due after this payment: Tk. {formatMoney(draftAmountDue)}
+                </p>
+                {!perms.canTakePayment && (
+                  <p className="text-[11px] text-muted-foreground">
+                    You can still save billing or issue invoice without collecting money.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">
                   Labor (billable)
                 </p>
@@ -1365,7 +1675,7 @@ export default function WorkOrderDetailPage() {
                   disabled={billingDisabled}
                   title={billingDisabledReason}
                 />
-                {laborError && <p className="text-[11px] text-red-400">{laborError}</p>}
+                {laborError && <p className="text-[11px] text-[var(--danger-text)]">{laborError}</p>}
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -1383,6 +1693,11 @@ export default function WorkOrderDetailPage() {
                 {!perms.canReadServices && (
                   <p className="text-[11px] text-muted-foreground">
                     Missing service catalog read permission.
+                  </p>
+                )}
+                {serviceRows.length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    No services added. Leave this section empty if not needed.
                   </p>
                 )}
                 <div className="hidden md:grid md:grid-cols-12 gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -1499,14 +1814,14 @@ export default function WorkOrderDetailPage() {
                       <button
                         type="button"
                         onClick={() => removeServiceRow(idx)}
-                        disabled={serviceRows.length === 1 || billingDisabled}
+                        disabled={billingDisabled}
                         title={billingDisabledReason}
                         className="md:col-span-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 text-right"
                       >
                         Remove
                       </button>
                       {serviceErrors[idx] && (
-                        <p className="col-span-12 text-[11px] text-red-400">{serviceErrors[idx]}</p>
+                        <p className="col-span-12 text-[11px] text-[var(--danger-text)]">{serviceErrors[idx]}</p>
                       )}
                     </div>
                   );
@@ -1576,7 +1891,7 @@ export default function WorkOrderDetailPage() {
                         title={billingDisabledReason}
                       />
                       {chargeErrors[idx] && (
-                        <p className="text-[11px] text-red-400 mt-1">{chargeErrors[idx]}</p>
+                        <p className="mt-1 text-[11px] text-[var(--danger-text)]">{chargeErrors[idx]}</p>
                       )}
                     </div>
                     <div className="md:col-span-3">
@@ -1617,7 +1932,7 @@ export default function WorkOrderDetailPage() {
                 ))}
               </div>
               {billingError && (
-                <p className="text-xs text-red-400">{billingError}</p>
+                <p className="text-xs text-[var(--danger-text)]">{billingError}</p>
               )}
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-1">
                 <p>Labor Tk. {formatMoney(laborAmountDraft)}</p>
@@ -1631,25 +1946,47 @@ export default function WorkOrderDetailPage() {
                 <p className="text-foreground font-semibold">
                   Total Tk. {formatMoney(draftGrandTotal)}
                 </p>
+                <p>Payment now Tk. {formatMoney(paymentCollectedDraft)}</p>
                 <p className="text-foreground font-semibold">
-                  Amount due Tk. {formatMoney(draftAmountDue)}
+                  Remaining due Tk. {formatMoney(draftAmountDue)}
                 </p>
+                <p>Current invoice due Tk. {formatMoney(detail.data?.invoice?.outstandingAmount ?? financials.outstandingAmount)}</p>
+                <p>Current paid Tk. {formatMoney(detail.data?.invoice?.totalPaid ?? financials.totalPaid)}</p>
               </div>
-              <button
-                onClick={handleBillingSave}
-                disabled={billingDisabled}
-                title={billingDisabledReason}
-                className="w-full py-2 rounded-lg bg-muted font-semibold text-foreground disabled:opacity-50 hover:bg-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-              >
-                {billingMutation.isPending
-                  ? "Submitting..."
-                  : wo?.status === "Closed"
-                  ? "Save billing changes"
-                  : "Submit billing & close"}
-              </button>
+              <div className="grid gap-2 md:grid-cols-3">
+                <button
+                  onClick={handleBillingSave}
+                  disabled={billingDisabled}
+                  title={billingDisabledReason}
+                  className="w-full py-2 rounded-lg bg-muted font-semibold text-foreground disabled:opacity-50 hover:bg-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                >
+                  {billingMutation.isPending ? "Saving..." : "Save draft"}
+                </button>
+                <button
+                  onClick={handleIssueInvoice}
+                  disabled={billingDisabled || !perms.canCreateInvoice}
+                  title={!perms.canCreateInvoice ? "Missing invoice create permission." : billingDisabledReason}
+                  className="w-full py-2 rounded-lg bg-primary/80 font-semibold text-foreground disabled:opacity-50 hover:bg-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                >
+                  {billingMutation.isPending ? "Working..." : "Issue invoice"}
+                </button>
+                <button
+                  onClick={handleCloseWorkOrder}
+                  disabled={billingDisabled || closeBlockedByDue}
+                  title={closeBlockedByDue ? "Full payment is required before closing this work order." : billingDisabledReason}
+                  className="w-full py-2 rounded-lg bg-accent font-semibold text-background disabled:opacity-50 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                >
+                  {billingMutation.isPending ? "Working..." : "Save, take payment & close"}
+                </button>
+              </div>
+              {closeBlockedByDue && (
+                <p className="text-[11px] text-[var(--warning-text)]">
+                  Work order closes only after the bill is fully paid. Use “Use full due” to autofill the remaining amount.
+                </p>
+              )}
               {billingLocked && (
                 <p className="text-[11px] text-muted-foreground">
-                  Work order is already closed.
+                  Closed billing edits are restricted to owner admin.
                 </p>
               )}
               {!canEditBilling && (
@@ -1658,15 +1995,15 @@ export default function WorkOrderDetailPage() {
                 </p>
               )}
               {wo?.status === "Closed" && (
-                <div className="w-full py-2 rounded-lg bg-muted text-center font-semibold text-green-400">
-                  Work order closed & paid
+                <div className="w-full rounded-lg bg-muted py-2 text-center font-semibold text-[var(--success-text)]">
+                  Work order closed & fully settled
                 </div>
               )}
             </div>
           }
 
           {perms.canAssign && (
-            <div className="glass p-4 rounded-xl space-y-3">
+            <div className={`glass p-4 rounded-xl space-y-3 ${isSectionVisible("activity") ? "" : "hidden"}`}>
               <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-foreground">Assignments</p>
                 <span className="text-xs text-muted-foreground">
@@ -1682,7 +2019,7 @@ export default function WorkOrderDetailPage() {
                 <p className="text-sm text-muted-foreground">Loading team...</p>
               )}
               {assignableEmployees.isError && (
-                <p className="text-sm text-red-400">
+                <p className="text-sm text-[var(--danger-text)]">
                   Unable to load team list.
                 </p>
               )}
@@ -1728,7 +2065,7 @@ export default function WorkOrderDetailPage() {
           )}
 
           {
-            <div className="glass p-4 rounded-xl space-y-3">
+            <div className={`glass p-4 rounded-xl space-y-3 ${isSectionVisible("inventory") ? "" : "hidden"}`}>
               <div className="flex items-center justify-between">
                 <p className="font-semibold text-foreground">Issue Part</p>
                 {issueMutation.isPending && (
@@ -1768,8 +2105,8 @@ export default function WorkOrderDetailPage() {
               </select>
               <input
                 disabled={!canIssueHere}
-                type="number"
-                min={1}
+                type="text"
+                inputMode="numeric"
                 placeholder="Qty"
                 value={issueForm.qty}
                 onChange={(e) =>
@@ -1796,7 +2133,7 @@ export default function WorkOrderDetailPage() {
             </div>
           }
 
-          <div className="glass p-4 rounded-xl space-y-3">
+          <div className={`glass p-4 rounded-xl space-y-3 ${isSectionVisible("activity") ? "" : "hidden"}`}>
             <p className="font-semibold text-foreground">Tech View</p>
             <div className="flex items-center gap-2">
               <p className="text-sm text-muted-foreground">Status:</p>
@@ -1874,7 +2211,7 @@ export default function WorkOrderDetailPage() {
             }}
             placeholder="Why was this work order canceled?"
           />
-          {cancelError && <p className="text-xs text-red-400">{cancelError}</p>}
+          {cancelError && <p className="text-xs text-[var(--danger-text)]">{cancelError}</p>}
         </div>
       </Dialog>
     </Shell>

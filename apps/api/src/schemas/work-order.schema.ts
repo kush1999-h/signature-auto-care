@@ -6,6 +6,9 @@ export type WorkOrderDocument = HydratedDocument<WorkOrder>;
 
 @Schema({ timestamps: true })
 export class WorkOrder {
+  @Prop({ required: true, unique: true, trim: true })
+  workOrderNumber!: string;
+
   @Prop({ type: Types.ObjectId, ref: "Customer", required: true })
   customerId!: Types.ObjectId;
 
@@ -123,6 +126,7 @@ export class WorkOrder {
 }
 
 export const WorkOrderSchema = SchemaFactory.createForClass(WorkOrder);
+WorkOrderSchema.index({ workOrderNumber: 1 }, { unique: true });
 WorkOrderSchema.index({ status: 1 });
 WorkOrderSchema.index({ deliveredAt: 1 });
 WorkOrderSchema.index({ dateIn: 1 });

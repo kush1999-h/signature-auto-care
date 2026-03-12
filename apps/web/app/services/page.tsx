@@ -9,6 +9,9 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Table, THead, TBody, TR, TH, TD } from "../../components/ui/table";
 import { useToast } from "../../components/ui/toast";
+import { Badge } from "../../components/ui/badge";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
 
 type ServiceItem = {
   _id: string;
@@ -166,30 +169,34 @@ export default function ServicesPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between gap-4 mb-4">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Service Catalog</h1>
-          <p className="text-sm text-muted-foreground">
-            Maintain fixed-price services (wash, detailing, diagnostics, etc).
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Service Catalog"
+        description="Maintain fixed-price services with a calm list-and-editor workflow."
+        badge={<Badge variant="secondary">{services.length} services</Badge>}
+      />
 
-      <div className="glass p-4 rounded-xl mb-4 space-y-3">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <PageToolbar>
+        <PageToolbarSection>
           <Input
-            placeholder="Search by name/code/category"
+            placeholder="Search by name, code, or category"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            className="md:max-w-sm"
           />
+        </PageToolbarSection>
+        <PageToolbarSection align="end">
           <div className="text-xs text-muted-foreground flex items-center">
-            {servicesQuery.isFetching ? "Refreshing..." : `${services.length} services`}
+            {servicesQuery.isFetching ? "Refreshing..." : "Status and pricing stay in sync with the editor."}
           </div>
-        </div>
-      </div>
+        </PageToolbarSection>
+      </PageToolbar>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="glass p-4 rounded-xl xl:col-span-2">
+          <div className="flex items-center justify-between mb-3">
+            <p className="font-semibold text-foreground">Service list</p>
+            <span className="text-xs text-muted-foreground">{services.length} visible</span>
+          </div>
           <div className="overflow-x-auto">
             <Table>
               <THead>
@@ -206,12 +213,16 @@ export default function ServicesPage() {
               <TBody>
                 {services.map((item) => (
                   <TR key={item._id}>
-                    <TD>{item.code}</TD>
-                    <TD>{item.name}</TD>
+                    <TD className="font-mono text-xs">{item.code}</TD>
+                    <TD className="font-medium text-foreground">{item.name}</TD>
                     <TD>{item.category || "--"}</TD>
-                    <TD>Tk. {formatMoney(item.defaultPrice)}</TD>
-                    <TD>Tk. {formatMoney(item.defaultCost)}</TD>
-                    <TD>{item.isActive === false ? "Inactive" : "Active"}</TD>
+                    <TD className="text-right">Tk. {formatMoney(item.defaultPrice)}</TD>
+                    <TD className="text-right text-muted-foreground">Tk. {formatMoney(item.defaultCost)}</TD>
+                    <TD>
+                      <Badge variant={item.isActive === false ? "warning" : "success"}>
+                        {item.isActive === false ? "Inactive" : "Active"}
+                      </Badge>
+                    </TD>
                     <TD className="space-x-2">
                       {canUpdate && (
                         <Button size="sm" variant="secondary" onClick={() => startEditing(item)}>
@@ -244,9 +255,14 @@ export default function ServicesPage() {
         </div>
 
         <div className="glass p-4 rounded-xl space-y-3">
+          <div className="space-y-1">
+            <p className="font-semibold text-foreground">{editingId ? "Edit service" : "Create service"}</p>
+            <p className="text-xs text-muted-foreground">
+              Keep this panel simple: save pricing, category, and active state.
+            </p>
+          </div>
           {editingId ? (
             <>
-              <p className="font-semibold text-foreground">Edit service</p>
               <Input
                 value={editForm.name}
                 onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
@@ -266,18 +282,16 @@ export default function ServicesPage() {
                 disabled={!canUpdate}
               />
               <Input
-                type="number"
-                min={0}
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={editForm.defaultPrice}
                 onChange={(e) => setEditForm((p) => ({ ...p, defaultPrice: e.target.value }))}
                 placeholder="Default price"
                 disabled={!canPriceUpdate && !canUpdate}
               />
               <Input
-                type="number"
-                min={0}
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={editForm.defaultCost}
                 onChange={(e) => setEditForm((p) => ({ ...p, defaultCost: e.target.value }))}
                 placeholder="Default cost"
@@ -326,7 +340,6 @@ export default function ServicesPage() {
             </>
           ) : (
             <>
-              <p className="font-semibold text-foreground">Create service</p>
               <Input
                 value={form.name}
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
@@ -346,18 +359,16 @@ export default function ServicesPage() {
                 disabled={!canCreate}
               />
               <Input
-                type="number"
-                min={0}
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={form.defaultPrice}
                 onChange={(e) => setForm((p) => ({ ...p, defaultPrice: e.target.value }))}
                 placeholder="Default price"
                 disabled={!canCreate}
               />
               <Input
-                type="number"
-                min={0}
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={form.defaultCost}
                 onChange={(e) => setForm((p) => ({ ...p, defaultCost: e.target.value }))}
                 placeholder="Default cost"
@@ -382,4 +393,3 @@ export default function ServicesPage() {
     </Shell>
   );
 }
-

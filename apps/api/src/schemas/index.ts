@@ -9,6 +9,7 @@ export * from "./work-order.schema";
 export * from "./time-log.schema";
 export * from "./invoice.schema";
 export * from "./payment.schema";
+export * from "./vendor-payment.schema";
 export * from "./expense.schema";
 export * from "./payable.schema";
 export * from "./audit-log.schema";

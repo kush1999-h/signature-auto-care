@@ -1,35 +1,45 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Shell from "../../components/shell";
 import api from "../../lib/api-client";
-import { useMemo, useState } from "react";
-import clsx from "clsx";
 import { useAuth } from "../../lib/auth-context";
-import Link from "next/link";
 import { SegmentedControl } from "../../components/ui/segmented-control";
 import { EmptyState } from "../../components/ui/empty-state";
 import { ErrorState } from "../../components/ui/error-state";
 import { Skeleton } from "../../components/ui/skeleton";
 import { Dialog } from "../../components/ui/dialog";
 import { Textarea } from "../../components/ui/textarea";
+import { Table, TBody, TD, TH, THead, TR } from "../../components/ui/table";
+import { Input } from "../../components/ui/input";
+import { Button } from "../../components/ui/button";
+import { Badge } from "../../components/ui/badge";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
 
-const statuses = ["Scheduled", "In Progress", "Closed", "Canceled"];
+const statuses = ["All", "Scheduled", "In Progress", "Closed", "Canceled"] as const;
 
 type WorkOrder = {
   _id: string;
+  workOrderNumber?: string;
   complaint?: string;
   status?: string;
-  vehicleId?: string;
   createdAt?: string;
   dateIn?: string;
   deliveredAt?: string | null;
   isHistorical?: boolean;
-  billableLaborAmount?: number;
-  partsUsed?: { sellingPriceAtTime?: number; qty?: number }[];
-  servicesUsed?: { unitPriceAtTime?: number; qty?: number }[];
-  otherCharges?: { amount?: number }[];
   assignedEmployees?: { employeeId?: string }[];
+  customer?: { name?: string; phone?: string };
+  vehicle?: { make?: string; model?: string; plate?: string };
+  invoice?: {
+    invoiceNumber?: string;
+    status?: string;
+    total?: number;
+    totalPaid?: number;
+    outstandingAmount?: number;
+  };
 };
 
 const normalizeId = (val?: string | { toString?: () => string }) => {
@@ -45,32 +55,45 @@ const formatMoney = (val: number | string | null | undefined) => {
   return Number.isFinite(num) ? num.toFixed(2) : "--";
 };
 
-const summarizeWorkOrder = (wo: WorkOrder) => {
-  const labor = Number(wo.billableLaborAmount || 0);
-  const partsTotal = (wo.partsUsed || []).reduce((sum, part) => sum + Number(part.sellingPriceAtTime || 0) * (part.qty || 0), 0);
-  const servicesTotal = (wo.servicesUsed || []).reduce(
-    (sum, service) => sum + Number(service.unitPriceAtTime || 0) * (service.qty || 0),
-    0
-  );
-  const otherTotal = (wo.otherCharges || []).reduce((sum, charge) => sum + Number(charge?.amount || 0), 0);
-  return {
-    labor,
-    partsTotal,
-    servicesTotal,
-    otherTotal,
-    total: labor + partsTotal + servicesTotal + otherTotal,
-  };
+const statusBadgeVariant = (status?: string) => {
+  if (status === "Closed") return "success";
+  if (status === "Canceled") return "warning";
+  if (status === "In Progress") return "default";
+  return "secondary";
 };
 
-const getDateOut = (wo: WorkOrder) => wo.deliveredAt || wo.createdAt || "";
+const getDateIn = (wo: WorkOrder) => wo.dateIn || wo.createdAt || "";
+const getDateOut = (wo: WorkOrder) => wo.deliveredAt || "";
+
+const getRowWarnings = (wo: WorkOrder) => {
+  const warnings: string[] = [];
+  const due = Number(wo.invoice?.outstandingAmount || 0);
+  const assignedCount = wo.assignedEmployees?.length || 0;
+  const ageMs = Date.now() - new Date(getDateIn(wo) || 0).getTime();
+  const ageDays = Number.isFinite(ageMs) ? ageMs / 86400000 : 0;
+  if (due > 0) warnings.push("Due");
+  if (assignedCount === 0 && wo.status !== "Closed" && wo.status !== "Canceled") warnings.push("Unassigned");
+  if (wo.status === "Scheduled" && ageDays >= 2) warnings.push("Aging");
+  if (wo.status === "Closed" && due > 0) warnings.push("Closed unpaid");
+  return warnings;
+};
+
+const getPrimaryAction = (wo: WorkOrder) => {
+  const due = Number(wo.invoice?.outstandingAmount || 0);
+  if (wo.status === "Scheduled") return { label: "Start", status: "In Progress" };
+  if (wo.status === "In Progress") return { label: "Close", status: "Closed" };
+  if (wo.status === "Closed" && due > 0) return { label: "Take payment", status: null };
+  return { label: "Open", status: null };
+};
 
 export default function WorkOrdersPage() {
   const { session } = useAuth();
   const qc = useQueryClient();
-  const [statusFilter, setStatusFilter] = useState<string>();
+  const [statusFilter, setStatusFilter] = useState<(typeof statuses)[number]>("All");
   const [search, setSearch] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
-  const [sortBy, setSortBy] = useState<"recent" | "oldest" | "amount" | "status">("recent");
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
+  const [sortBy, setSortBy] = useState<"recent" | "oldest" | "amount" | "status" | "due">("recent");
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [page, setPage] = useState(1);
@@ -78,24 +101,22 @@ export default function WorkOrdersPage() {
   const [cancelTargetId, setCancelTargetId] = useState<string | null>(null);
   const [cancelNote, setCancelNote] = useState("");
   const [cancelError, setCancelError] = useState("");
-  const pageSize = 12;
+  const pageSize = 14;
 
   const rawUserId = session?.user?.userId || (session?.user as { _id?: string } | undefined)?._id;
   const userId = useMemo(() => normalizeId(rawUserId), [rawUserId]);
   const canReadAll = session?.user?.permissions?.includes("WORKORDERS_READ_ALL");
   const canReadAssigned = session?.user?.permissions?.includes("WORKORDERS_READ_ASSIGNED");
   const canUpdateStatus = session?.user?.permissions?.includes("WORKORDERS_UPDATE_STATUS");
-  const filterStatuses = statuses;
-  const updateStatuses = statuses;
   const showBoard = canReadAll || canReadAssigned;
 
   const workOrders = useQuery({
     queryKey: ["work-orders", statusFilter],
     queryFn: async () => {
       const res = await api.get("/work-orders", {
-        params: { status: statusFilter },
+        params: { status: statusFilter === "All" ? undefined : statusFilter },
       });
-      return res.data;
+      return res.data as WorkOrder[];
     },
     enabled: showBoard,
   });
@@ -104,21 +125,33 @@ export default function WorkOrdersPage() {
     mutationFn: (payload: { id: string; status: string; note?: string }) =>
       api.patch(`/work-orders/${payload.id}/status`, {
         status: payload.status,
-        note: payload.note
+        note: payload.note,
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["work-orders"] }),
   });
 
-  // Additional filters are applied client-side to avoid changing backend query semantics (status is server-filtered).
   const filtered = useMemo(() => {
-    const items: WorkOrder[] = (workOrders.data as WorkOrder[]) || [];
+    const items = workOrders.data || [];
     const term = search.trim().toLowerCase();
     const start = startDate ? new Date(startDate) : null;
     const end = endDate ? new Date(endDate) : null;
 
     const bySearch = term
       ? items.filter((wo) => {
-          const haystack = `${wo.complaint || ""} ${wo.vehicleId || ""} ${wo._id}`.toLowerCase();
+          const haystack = [
+            wo.workOrderNumber,
+            wo._id,
+            wo.complaint,
+            wo.customer?.name,
+            wo.customer?.phone,
+            wo.vehicle?.make,
+            wo.vehicle?.model,
+            wo.vehicle?.plate,
+            wo.invoice?.invoiceNumber,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
           return haystack.includes(term);
         })
       : items;
@@ -126,42 +159,30 @@ export default function WorkOrdersPage() {
     const byAssigned =
       assignedOnly && userId
         ? bySearch.filter((wo) =>
-          (wo.assignedEmployees || []).some(
-            (a) =>
-                a.employeeId &&
-                normalizeId(a.employeeId) === userId
+            (wo.assignedEmployees || []).some((a) => a.employeeId && normalizeId(a.employeeId) === userId)
           )
-        )
         : bySearch;
 
     const byDate = byAssigned.filter((wo) => {
-      if ((!wo.deliveredAt && !wo.createdAt) || (!start && !end)) return true;
-      const dateOut = new Date(getDateOut(wo));
-      if (start && dateOut < start) return false;
+      if (!start && !end) return true;
+      const anchor = new Date(getDateOut(wo) || getDateIn(wo) || 0);
+      if (start && anchor < start) return false;
       if (end) {
         const endOfDay = new Date(end);
         endOfDay.setHours(23, 59, 59, 999);
-        if (dateOut > endOfDay) return false;
+        if (anchor > endOfDay) return false;
       }
       return true;
     });
 
-    const sorted = [...byDate].sort((a, b) => {
-      if (sortBy === "amount") {
-        return summarizeWorkOrder(b).total - summarizeWorkOrder(a).total;
-      }
-      if (sortBy === "status") {
-        return (a.status || "").localeCompare(b.status || "");
-      }
-      if (sortBy === "oldest") {
-        return new Date(getDateOut(a) || 0).getTime() - new Date(getDateOut(b) || 0).getTime();
-      }
-      // recent default
-      return new Date(getDateOut(b) || 0).getTime() - new Date(getDateOut(a) || 0).getTime();
+    return [...byDate].sort((a, b) => {
+      if (sortBy === "amount") return Number(b.invoice?.total || 0) - Number(a.invoice?.total || 0);
+      if (sortBy === "due") return Number(b.invoice?.outstandingAmount || 0) - Number(a.invoice?.outstandingAmount || 0);
+      if (sortBy === "status") return (a.status || "").localeCompare(b.status || "");
+      if (sortBy === "oldest") return new Date(getDateIn(a) || 0).getTime() - new Date(getDateIn(b) || 0).getTime();
+      return new Date(getDateIn(b) || 0).getTime() - new Date(getDateIn(a) || 0).getTime();
     });
-
-    return sorted;
-  }, [workOrders.data, search, assignedOnly, startDate, endDate, sortBy, userId]);
+  }, [assignedOnly, endDate, search, sortBy, startDate, userId, workOrders.data]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, pageCount);
@@ -169,115 +190,134 @@ export default function WorkOrdersPage() {
 
   return (
     <Shell>
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Work Orders</h1>
-          <p className="text-muted-foreground text-sm">
-            Track assignments, billing, and progress in one place.
-          </p>
-        </div>
-        {showBoard && (
-          <div className="flex flex-wrap gap-2 items-center">
-            <span className="text-xs text-muted-foreground">Status</span>
-            <SegmentedControl
-              aria-label="Status filter"
-              options={filterStatuses.map((s) => ({ value: s, label: s }))}
-              value={statusFilter || ""}
-              onChange={(val) => {
-                setStatusFilter(val === statusFilter ? undefined : val);
-                setPage(1);
-              }}
-            />
-          </div>
-        )}
-      </div>
+      <PageHeader
+        title="Work Orders"
+        description="Scan jobs, spot due work, and move each order to its next action quickly."
+        badge={<Badge variant="secondary">{filtered.length} showing</Badge>}
+        actions={
+          canUpdateStatus ? (
+            <Button asChild size="sm">
+              <Link href="/intake">New Intake</Link>
+            </Button>
+          ) : undefined
+        }
+      />
 
       {!showBoard ? (
         <div className="glass p-6 rounded-xl">
-          <p className="font-semibold">View-only</p>
-          <p className="text-sm text-white/60">You do not have work order access for this board.</p>
+          <p className="font-semibold text-foreground">No access</p>
+          <p className="text-sm text-muted-foreground">Work order access is required to use this board.</p>
         </div>
       ) : (
         <>
           <div className="glass p-4 rounded-xl mb-4 space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-              <label className="flex flex-col gap-1 text-sm text-muted-foreground">
-                <span>Search</span>
-                <input
+            <PageToolbar className="p-0 bg-transparent border-0 shadow-none">
+              <PageToolbarSection>
+                <SegmentedControl
+                  aria-label="Status filter"
+                  options={statuses.map((status) => ({ value: status, label: status }))}
+                  value={statusFilter}
+                  onChange={(val) => {
+                    setStatusFilter(val as (typeof statuses)[number]);
+                    setPage(1);
+                  }}
+                />
+                <Button
+                  variant={showMoreFilters ? "secondary" : "ghost"}
+                  onClick={() => setShowMoreFilters((open) => !open)}
+                >
+                  {showMoreFilters ? "Hide filters" : "More filters"}
+                </Button>
+                <label className="inline-flex items-center gap-2 text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={assignedOnly}
+                    onChange={(e) => {
+                      setAssignedOnly(e.target.checked);
+                      setPage(1);
+                    }}
+                    className="h-4 w-4 rounded border-border bg-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  />
+                  <span className="text-sm text-muted-foreground">Assigned to me</span>
+                </label>
+              </PageToolbarSection>
+              <PageToolbarSection align="end">
+                <Input
                   value={search}
                   onChange={(e) => {
                     setSearch(e.target.value);
                     setPage(1);
                   }}
-                  placeholder="Search complaint, vehicle, or WO #"
-                  className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  placeholder="WO #, complaint, customer, phone, plate, invoice"
+                  className="xl:max-w-md"
                 />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-muted-foreground">
-                <span>Sort</span>
                 <select
                   value={sortBy}
                   onChange={(e) => {
                     setSortBy(e.target.value as typeof sortBy);
                     setPage(1);
                   }}
-                  className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary md:max-w-[180px]"
                 >
                   <option value="recent">Recent</option>
                   <option value="oldest">Oldest</option>
-                  <option value="amount">Amount (high to low)</option>
+                  <option value="amount">Highest total</option>
+                  <option value="due">Highest due</option>
                   <option value="status">Status</option>
                 </select>
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-muted-foreground">
-                <span>Start date</span>
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => {
-                    setStartDate(e.target.value);
-                    setPage(1);
-                  }}
-                  className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-muted-foreground">
-                <span>End date</span>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => {
-                    setEndDate(e.target.value);
-                    setPage(1);
-                  }}
-                  className="rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                />
-              </label>
-            </div>
-            <label className="inline-flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                checked={assignedOnly}
-                onChange={(e) => {
-                  setAssignedOnly(e.target.checked);
-                  setPage(1);
-                }}
-                className="h-4 w-4 rounded border-border bg-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-              />
-              <span className="text-sm text-muted-foreground">Assigned to me</span>
-            </label>
+                {showMoreFilters && (
+                  <>
+                    <Input
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => {
+                        setStartDate(e.target.value);
+                        setPage(1);
+                      }}
+                      className="md:max-w-[170px]"
+                    />
+                    <Input
+                      type="date"
+                      value={endDate}
+                      onChange={(e) => {
+                        setEndDate(e.target.value);
+                        setPage(1);
+                      }}
+                      className="md:max-w-[170px]"
+                    />
+                  </>
+                )}
+              </PageToolbarSection>
+            </PageToolbar>
           </div>
 
           {workOrders.isLoading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {Array.from({ length: 6 }).map((_, idx) => (
-                <div key={idx} className="glass p-4 rounded-xl space-y-3 border border-border/60">
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-6 w-32" />
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-10 w-full" />
-                </div>
-              ))}
+            <div className="rounded-xl border border-border overflow-hidden">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>WO #</TH>
+                    <TH>Customer</TH>
+                    <TH>Vehicle</TH>
+                    <TH>Status</TH>
+                    <TH>Date in</TH>
+                    <TH>Date out</TH>
+                    <TH>Total</TH>
+                    <TH>Due</TH>
+                    <TH>Assigned</TH>
+                    <TH>Action</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {Array.from({ length: 8 }).map((_, idx) => (
+                    <TR key={idx}>
+                      <TD colSpan={10}>
+                        <Skeleton className="h-5 w-full" />
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
             </div>
           ) : workOrders.isError ? (
             <ErrorState
@@ -285,103 +325,153 @@ export default function WorkOrdersPage() {
               onRetry={() => workOrders.refetch()}
             />
           ) : filtered.length === 0 ? (
-            <EmptyState title="No work orders" description="Try adjusting filters or date range." />
+            <EmptyState title="No work orders" description="Try adjusting filters or search terms." />
           ) : (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {paged.map((wo) => {
-                  const summary = summarizeWorkOrder(wo);
-                  const assignedCount = wo.assignedEmployees?.length || 0;
-                  return (
-                    <div key={wo._id} className="glass p-4 rounded-xl space-y-3 border border-border/60">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <Link href={`/work-orders/${wo._id}`} className="block hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary rounded">
-                            <p className="font-semibold">{wo.complaint || "General service"}</p>
-                          </Link>
-                          <p className="text-xs text-muted-foreground">WO #{wo._id}</p>
-                          <p className="text-xs text-muted-foreground">Vehicle #{wo.vehicleId || "N/A"}</p>
-                          {(wo.dateIn || wo.createdAt) && (
-                            <p className="text-[11px] text-muted-foreground">
-                              Created {new Date(wo.dateIn || wo.createdAt || "").toLocaleDateString()}
-                            </p>
-                          )}
-                          {wo.isHistorical && (
-                            <p className="text-[11px] text-accent">Historical entry</p>
-                          )}
-                          <p className="text-[11px] text-muted-foreground">
-                            Date Out {wo.deliveredAt ? new Date(wo.deliveredAt).toLocaleDateString() : "--"}
-                          </p>
-                        </div>
-                        <div className="text-right space-y-1">
-                          <span className="text-[11px] px-2 py-1 rounded bg-white/10 inline-block">{wo.status}</span>
-                          <p className="text-lg font-semibold text-foreground">Tk. {formatMoney(summary.total)}</p>
-                          <p className="text-[11px] text-muted-foreground">
-                            Parts Tk. {formatMoney(summary.partsTotal)} | Services Tk. {formatMoney(summary.servicesTotal)} | Labor Tk. {formatMoney(summary.labor)}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <span className="rounded-full border border-border px-2 py-1">Parts {wo.partsUsed?.length || 0}</span>
-                        <span className="rounded-full border border-border px-2 py-1">Services {wo.servicesUsed?.length || 0}</span>
-                        <span className="rounded-full border border-border px-2 py-1">
-                          Other Tk. {formatMoney(summary.otherTotal)}
-                        </span>
-                        <span className="rounded-full border border-border px-2 py-1">Assigned {assignedCount}</span>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Link
-                          href={`/work-orders/${wo._id}`}
-                          className="px-3 py-2 rounded-md bg-white/10 text-sm font-semibold hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                        >
-                          Open
-                        </Link>
-                        {updateStatuses.map((s) => (
-                          <button
-                            key={s}
-                            disabled={!canUpdateStatus || updateStatus.isPending}
-                            onClick={() => {
-                              if (s === "Canceled") {
-                                setCancelTargetId(wo._id);
-                                setCancelDialogOpen(true);
-                                setCancelError("");
-                                return;
-                              }
-                              updateStatus.mutate({ id: wo._id, status: s });
-                            }}
-                            className={clsx(
-                              "px-2 py-1 rounded text-[11px] disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
-                              wo.status === s ? "bg-brand.red/80 text-white" : "bg-white/10 hover:bg-white/15"
-                            )}
-                          >
-                            {s}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="rounded-xl border border-border overflow-hidden">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>WO #</TH>
+                      <TH>Customer</TH>
+                      <TH>Vehicle</TH>
+                      <TH>Status</TH>
+                      <TH>Date in</TH>
+                      <TH>Date out</TH>
+                      <TH>Total</TH>
+                      <TH>Due</TH>
+                      <TH>Assigned</TH>
+                      <TH>Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {paged.map((wo) => {
+                      const warnings = getRowWarnings(wo);
+                      const primaryAction = getPrimaryAction(wo);
+                      const due = Number(wo.invoice?.outstandingAmount || 0);
+                      const assignedCount = wo.assignedEmployees?.length || 0;
+                      return (
+                        <TR key={wo._id} className={due > 0 ? "bg-amber-500/5" : undefined}>
+                          <TD>
+                            <div className="space-y-1">
+                              <Link
+                                href={`/work-orders/${wo._id}`}
+                                className="font-semibold text-foreground hover:text-accent"
+                              >
+                                {wo.workOrderNumber || wo._id}
+                              </Link>
+                              {wo.isHistorical && <p className="text-[11px] text-accent">Historical</p>}
+                            </div>
+                          </TD>
+                          <TD>
+                            <div className="space-y-1">
+                              <p className="font-medium text-foreground">{wo.customer?.name || "--"}</p>
+                              <p className="text-xs text-muted-foreground">{wo.customer?.phone || "--"}</p>
+                            </div>
+                          </TD>
+                          <TD>
+                            <div className="space-y-1">
+                              <p className="text-foreground">
+                                {wo.vehicle?.make || "--"} {wo.vehicle?.model || ""}
+                              </p>
+                              <p className="text-xs text-muted-foreground">{wo.vehicle?.plate || "--"}</p>
+                            </div>
+                          </TD>
+                          <TD>
+                            <div className="space-y-2">
+                              <Badge variant={statusBadgeVariant(wo.status)}>{wo.status || "--"}</Badge>
+                              <div className="flex flex-wrap gap-1">
+                                {warnings.map((warning) => (
+                                  <Badge key={warning} variant="secondary">
+                                    {warning}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </div>
+                          </TD>
+                          <TD>{getDateIn(wo) ? new Date(getDateIn(wo)).toLocaleDateString() : "--"}</TD>
+                          <TD>{getDateOut(wo) ? new Date(getDateOut(wo)).toLocaleDateString() : "--"}</TD>
+                          <TD>
+                            <div className="space-y-1">
+                              <p className="font-semibold text-foreground">Tk. {formatMoney(wo.invoice?.total)}</p>
+                              <p className="text-xs text-muted-foreground">{wo.invoice?.invoiceNumber || "--"}</p>
+                            </div>
+                          </TD>
+                          <TD className={due > 0 ? "font-semibold text-[var(--warning-text)]" : "text-muted-foreground"}>
+                            Tk. {formatMoney(wo.invoice?.outstandingAmount)}
+                          </TD>
+                          <TD>{assignedCount}</TD>
+                          <TD>
+                            <div className="flex flex-wrap gap-2">
+                              <Link
+                                href={`/work-orders/${wo._id}`}
+                                className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold shadow-sm hover:bg-muted"
+                              >
+                                Open
+                              </Link>
+                              {primaryAction.status && canUpdateStatus && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updateStatus.mutate({ id: wo._id, status: primaryAction.status! })
+                                  }
+                                  className="px-3 py-1.5 rounded-md bg-primary/80 text-xs font-semibold text-foreground hover:bg-primary"
+                                  disabled={updateStatus.isPending}
+                                >
+                                  {primaryAction.label}
+                                </button>
+                              )}
+                              {primaryAction.label === "Take payment" && (
+                                <Link
+                                  href={`/work-orders/${wo._id}`}
+                                  className="px-3 py-1.5 rounded-md bg-accent text-xs font-semibold text-background hover:brightness-110"
+                                >
+                                  Take payment
+                                </Link>
+                              )}
+                              {wo.status !== "Closed" && wo.status !== "Canceled" && canUpdateStatus && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCancelTargetId(wo._id);
+                                    setCancelDialogOpen(true);
+                                    setCancelError("");
+                                  }}
+                                  className="px-3 py-1.5 rounded-md bg-muted text-xs font-semibold hover:bg-border"
+                                  disabled={updateStatus.isPending}
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                            </div>
+                          </TD>
+                        </TR>
+                      );
+                    })}
+                  </TBody>
+                </Table>
               </div>
+
               {pageCount > 1 && (
                 <div className="flex items-center justify-between mt-4 text-sm text-muted-foreground">
                   <span>
                     Page {currentPage} of {pageCount}
                   </span>
                   <div className="flex gap-2">
-                    <button
-                      className="px-3 py-1 rounded border border-border bg-muted hover:bg-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
+                    <Button
+                      variant="secondary"
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
                       disabled={currentPage === 1}
                     >
                       Previous
-                    </button>
-                    <button
-                      className="px-3 py-1 rounded border border-border bg-muted hover:bg-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
+                    </Button>
+                    <Button
+                      variant="secondary"
                       onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
                       disabled={currentPage === pageCount}
                     >
                       Next
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -389,6 +479,7 @@ export default function WorkOrdersPage() {
           )}
         </>
       )}
+
       <Dialog
         open={cancelDialogOpen}
         onClose={() => {
@@ -400,8 +491,8 @@ export default function WorkOrdersPage() {
         title="Cancel work order"
         footer={
           <div className="flex gap-2">
-            <button
-              className="px-3 py-2 rounded-md border border-border text-sm"
+            <Button
+              variant="secondary"
               onClick={() => {
                 setCancelDialogOpen(false);
                 setCancelTargetId(null);
@@ -410,9 +501,8 @@ export default function WorkOrdersPage() {
               }}
             >
               Keep open
-            </button>
-            <button
-              className="px-3 py-2 rounded-md bg-primary text-sm font-semibold text-foreground disabled:opacity-60"
+            </Button>
+            <Button
               disabled={updateStatus.isPending}
               onClick={() => {
                 const message = cancelNote.trim();
@@ -429,13 +519,13 @@ export default function WorkOrdersPage() {
                       setCancelTargetId(null);
                       setCancelNote("");
                       setCancelError("");
-                    }
+                    },
                   }
                 );
               }}
             >
               {updateStatus.isPending ? "Canceling..." : "Confirm cancel"}
-            </button>
+            </Button>
           </div>
         }
       >
@@ -451,7 +541,7 @@ export default function WorkOrdersPage() {
             }}
             placeholder="Why was this work order canceled?"
           />
-          {cancelError && <p className="text-xs text-red-400">{cancelError}</p>}
+          {cancelError && <p className="text-xs text-[var(--danger-text)]">{cancelError}</p>}
         </div>
       </Dialog>
     </Shell>

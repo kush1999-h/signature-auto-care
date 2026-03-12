@@ -14,8 +14,17 @@ export const InvoiceType = {
 
 export const InvoiceStatus = {
   DRAFT: "DRAFT",
-  CLOSED: "CLOSED",
+  ISSUED: "ISSUED",
+  PARTIALLY_PAID: "PARTIALLY_PAID",
+  PAID: "PAID",
   VOID: "VOID"
+} as const;
+
+export const PaymentType = {
+  ADVANCE: "ADVANCE",
+  INVOICE_PAYMENT: "INVOICE_PAYMENT",
+  REFUND: "REFUND",
+  ADJUSTMENT: "ADJUSTMENT"
 } as const;
 
 export const InventoryTransactionType = {

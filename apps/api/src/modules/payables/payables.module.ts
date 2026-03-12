@@ -1,6 +1,11 @@
 import { Module } from "@nestjs/common";
 import { MongooseModule } from "@nestjs/mongoose";
-import { Payable, PayableSchema } from "../../schemas";
+import {
+  Payable,
+  PayableSchema,
+  VendorPayment,
+  VendorPaymentSchema,
+} from "../../schemas";
 import { AuditModule } from "../audit/audit.module";
 import { PayablesController } from "./payables.controller";
 import { PayablesService } from "./payables.service";
@@ -9,7 +14,8 @@ import { PayablesService } from "./payables.service";
   imports: [
     AuditModule,
     MongooseModule.forFeature([
-      { name: Payable.name, schema: PayableSchema }
+      { name: Payable.name, schema: PayableSchema },
+      { name: VendorPayment.name, schema: VendorPaymentSchema }
     ])
   ],
   controllers: [PayablesController],

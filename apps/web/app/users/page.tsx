@@ -5,6 +5,11 @@ import { useMemo, useState } from "react";
 import Shell from "../../components/shell";
 import api from "../../lib/api-client";
 import { useAuth } from "../../lib/auth-context";
+import { Input } from "../../components/ui/input";
+import { Button } from "../../components/ui/button";
+import { Badge } from "../../components/ui/badge";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
 
 const roleOptions = [
   { value: "OWNER_ADMIN", label: "Owner / Admin" },
@@ -259,6 +264,10 @@ export default function UsersPage() {
   });
 
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"ALL" | RoleKey>("ALL");
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "ACTIVE" | "DISABLED" | "UNVERIFIED">("ALL");
+  const [showAdvancedPermissions, setShowAdvancedPermissions] = useState(false);
   const [editForm, setEditForm] = useState({
     email: "",
     password: "",
@@ -311,6 +320,25 @@ export default function UsersPage() {
   });
 
   const cannotAccess = useMemo(() => !canRead && !canCreate, [canRead, canCreate]);
+  const filteredUsers = useMemo(() => {
+    const list = (users.data || []) as any[];
+    const term = search.trim().toLowerCase();
+    return list.filter((u) => {
+      const matchesSearch = !term
+        ? true
+        : `${u.name || ""} ${u.email || ""} ${u.role || ""}`.toLowerCase().includes(term);
+      const matchesRole = roleFilter === "ALL" ? true : u.role === roleFilter;
+      const matchesStatus =
+        statusFilter === "ALL"
+          ? true
+          : statusFilter === "ACTIVE"
+          ? Boolean(u.isActive)
+          : statusFilter === "DISABLED"
+          ? !u.isActive
+          : !u.emailVerified;
+      return matchesSearch && matchesRole && matchesStatus;
+    });
+  }, [roleFilter, search, statusFilter, users.data]);
   const createRolePermissions = useMemo(
     () => roleDefaultPermissions[form.role as RoleKey] || [],
     [form.role]
@@ -344,12 +372,11 @@ export default function UsersPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Users</h1>
-          <p className="text-muted-foreground text-sm">Manage staff accounts and roles.</p>
-        </div>
-      </div>
+      <PageHeader
+        title="Users"
+        description="Search staff quickly, review status, and keep role defaults clean."
+        badge={<Badge variant="secondary">{filteredUsers.length} users</Badge>}
+      />
 
       {cannotAccess ? (
         <div className="glass p-6 rounded-xl text-center">
@@ -359,92 +386,131 @@ export default function UsersPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="glass p-4 rounded-xl lg:col-span-2 space-y-3">
             <div className="flex items-center justify-between">
-              <p className="font-semibold text-foreground">Active Users</p>
+              <p className="font-semibold text-foreground">Staff Directory</p>
               {users.isLoading && <span className="text-xs text-muted-foreground">Loading...</span>}
             </div>
+            <PageToolbar className="p-0 bg-transparent border-0 shadow-none">
+              <PageToolbarSection>
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Name, email, role"
+                  className="md:max-w-xs"
+                />
+                <select
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value as typeof roleFilter)}
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground md:max-w-[220px]"
+                >
+                  <option value="ALL">All roles</option>
+                  {roleOptions.map((r) => (
+                    <option key={r.value} value={r.value}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground md:max-w-[220px]"
+                >
+                  <option value="ALL">All users</option>
+                  <option value="ACTIVE">Active</option>
+                  <option value="DISABLED">Disabled</option>
+                  <option value="UNVERIFIED">Unverified</option>
+                </select>
+              </PageToolbarSection>
+            </PageToolbar>
             <div className="space-y-2">
-              {(users.data || []).map((u: any) => (
-                <div key={u._id} className="flex items-center justify-between bg-card border border-border rounded-lg px-3 py-2">
-                  <div>
-                    <p className="font-semibold text-foreground">{u.name || u.email}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {u.email} | {u.role}
-                    </p>
-                    <p className={`text-xs ${u.emailVerified ? "text-accent" : "text-primary"}`}>
-                      {u.emailVerified ? "Email verified" : "Email not verified"}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="text-right">
-                      <p className="text-xs text-muted-foreground">{(u.permissions || []).length} perms</p>
-                      <p className={`text-xs ${u.isActive ? "text-accent" : "text-primary"}`}>{u.isActive ? "Active" : "Disabled"}</p>
+              {filteredUsers.map((u: any) => (
+                <div key={u._id} className="rounded-xl border border-border bg-card p-3">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-foreground">{u.name || u.email}</p>
+                        <Badge variant="secondary">{u.role}</Badge>
+                        <Badge variant={u.isActive ? "success" : "warning"}>
+                          {u.isActive ? "Active" : "Disabled"}
+                        </Badge>
+                        <Badge variant={u.emailVerified ? "success" : "warning"}>
+                          {u.emailVerified ? "Verified" : "Unverified"}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{u.email}</p>
+                      <p className="text-xs text-muted-foreground">{(u.permissions || []).length} permissions</p>
                     </div>
-                    {!u.emailVerified && canCreate && (
-                      <button
-                        onClick={() => resendOtp.mutate(u._id)}
-                        className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
-                        disabled={resendOtp.isPending}
-                      >
-                        Resend OTP
-                      </button>
-                    )}
-                    {canUpdate && (
-                      <button
-                        onClick={() => startEditing(u)}
-                        className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
-                      >
-                        Edit
-                      </button>
-                    )}
-                    {canDisable && u.role !== "OWNER_ADMIN" && (
-                      <button
-                        onClick={() => {
-                          if (window.confirm(`Delete user ${u.email}? This cannot be undone.`)) {
-                            deleteUser.mutate(u._id);
-                          }
-                        }}
-                        className="text-xs px-2 py-1 rounded border border-primary text-primary hover:bg-primary/10"
-                        disabled={deleteUser.isPending}
-                      >
-                        Delete
-                      </button>
-                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {!u.emailVerified && canCreate && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => resendOtp.mutate(u._id)}
+                          disabled={resendOtp.isPending}
+                        >
+                          Resend OTP
+                        </Button>
+                      )}
+                      {canUpdate && (
+                        <Button size="sm" variant="outline" onClick={() => startEditing(u)}>
+                          Edit
+                        </Button>
+                      )}
+                      {canDisable && u.role !== "OWNER_ADMIN" && (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => {
+                            if (window.confirm(`Delete user ${u.email}? This cannot be undone.`)) {
+                              deleteUser.mutate(u._id);
+                            }
+                          }}
+                          disabled={deleteUser.isPending}
+                        >
+                          Delete
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
+              {!users.isLoading && filteredUsers.length === 0 && (
+                <div className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
+                  No users match the current search or filter.
+                </div>
+              )}
             </div>
           </div>
 
           <div className="glass p-4 rounded-xl space-y-3">
-            <p className="font-semibold text-foreground">Add User</p>
+            <div className="space-y-1">
+              <p className="font-semibold text-foreground">Create User</p>
+              <p className="text-xs text-muted-foreground">Keep role defaults clean and only expand permissions when needed.</p>
+            </div>
             {!canCreate && <p className="text-sm text-muted-foreground">You need USERS_CREATE permission.</p>}
-            <input
+            <Input
               disabled={!canCreate}
               placeholder="Full name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
             />
-            <input
+            <Input
               disabled={!canCreate}
               placeholder="Email"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
-              className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
             />
-            <input
+            <Input
               disabled={!canCreate}
               type="password"
               placeholder="Temp password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
-              className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
             />
             <select
               disabled={!canCreate}
               value={form.role}
               onChange={(e) => setForm({ ...form, role: e.target.value })}
-              className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
+              className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
             >
               {roleOptions.map((r) => (
                 <option key={r.value} value={r.value}>
@@ -456,13 +522,14 @@ export default function UsersPage() {
               <p className="text-xs font-semibold text-foreground">Auto-selected permissions ({createRolePermissions.length})</p>
               <p className="text-[11px] text-muted-foreground mt-1 line-clamp-4">{createRolePermissions.join(", ")}</p>
             </div>
-            <button
+            <Button
               disabled={!canCreate || create.isPending}
               onClick={() => create.mutate()}
-              className="w-full py-2 rounded-lg bg-primary text-foreground font-semibold disabled:opacity-60"
+              className="w-full"
+              isLoading={create.isPending}
             >
-              {create.isPending ? "Saving..." : "Create User"}
-            </button>
+              Create User
+            </Button>
             {create.isSuccess && (
               <p className="text-xs text-accent">
                 User created. Verification OTP sent to email.
@@ -482,37 +549,27 @@ export default function UsersPage() {
               <div className="border-t border-border pt-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <p className="font-semibold text-foreground text-sm">Edit User</p>
-                  {editingUserId && (
-                    <button
-                      className="text-[11px] text-muted-foreground hover:text-foreground"
-                      onClick={() => setEditingUserId(null)}
-                    >
-                      Clear
-                    </button>
-                  )}
+                  {editingUserId && <Button size="sm" variant="ghost" onClick={() => setEditingUserId(null)}>Clear</Button>}
                 </div>
                 {!editingUserId && <p className="text-xs text-muted-foreground">Select a user from the list to edit.</p>}
-                <input
+                <Input
                   disabled={!editingUserId}
                   placeholder="Full name"
                   value={editForm.name}
                   onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
                 />
-                <input
+                <Input
                   disabled={!editingUserId}
                   placeholder="Email"
                   value={editForm.email}
                   onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
                 />
-                <input
+                <Input
                   disabled={!editingUserId}
                   type="password"
                   placeholder="New password (optional)"
                   value={editForm.password}
                   onChange={(e) => setEditForm({ ...editForm, password: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
                 />
                 <select
                   disabled={!editingUserId}
@@ -524,7 +581,7 @@ export default function UsersPage() {
                       permissions: [...(roleDefaultPermissions[e.target.value as RoleKey] || [])]
                     })
                   }
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground"
+                  className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground"
                 >
                   {roleOptions.map((r) => (
                     <option key={r.value} value={r.value}>
@@ -534,41 +591,70 @@ export default function UsersPage() {
                 </select>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold text-foreground">Permissions</p>
-                    <button
+                    <p className="text-sm font-semibold text-foreground">Role defaults</p>
+                    <Button
                       type="button"
+                      size="sm"
+                      variant="ghost"
                       disabled={!editingUserId}
-                      onClick={toggleAllPermissions}
-                      className="text-[11px] text-accent hover:underline disabled:opacity-60"
+                      onClick={() => setShowAdvancedPermissions((prev) => !prev)}
                     >
-                      {editForm.permissions.length === allPermissions.length ? "Clear all" : "Select all"}
-                    </button>
+                      {showAdvancedPermissions ? "Hide advanced" : "Advanced permissions"}
+                    </Button>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-                    {allPermissions.map((perm) => (
-                      <label
-                        key={perm}
-                        className="flex items-center gap-2 rounded-md border border-border px-2 py-2 text-xs"
-                      >
-                        <input
-                          type="checkbox"
+                  <div className="rounded-lg border border-border bg-card/50 px-3 py-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      {showAdvancedPermissions
+                        ? "Advanced permissions are visible. Keep custom overrides minimal."
+                        : "Advanced permissions stay collapsed by default."}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
+                    {editForm.permissions.length} permissions currently assigned to this user.
+                  </div>
+                  {showAdvancedPermissions && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold text-foreground">Advanced permissions</p>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
                           disabled={!editingUserId}
-                          checked={editForm.permissions.includes(perm)}
-                          onChange={() => togglePermission(perm)}
-                          className="h-4 w-4 accent-primary"
-                        />
-                        <span className="truncate">{perm}</span>
-                      </label>
-                    ))}
-                  </div>
+                          onClick={toggleAllPermissions}
+                        >
+                          {editForm.permissions.length === allPermissions.length ? "Clear all" : "Select all"}
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+                        {allPermissions.map((perm) => (
+                          <label
+                            key={perm}
+                            className="flex items-center gap-2 rounded-md border border-border px-2 py-2 text-xs"
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!editingUserId}
+                              checked={editForm.permissions.includes(perm)}
+                              onChange={() => togglePermission(perm)}
+                              className="h-4 w-4 accent-primary"
+                            />
+                            <span className="truncate">{perm}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <button
+                <Button
                   disabled={!editingUserId || updateUser.isPending}
                   onClick={() => updateUser.mutate()}
-                  className="w-full py-2 rounded-lg bg-muted text-foreground font-semibold disabled:opacity-60 hover:bg-border"
+                  className="w-full"
+                  variant="secondary"
+                  isLoading={updateUser.isPending}
                 >
-                  {updateUser.isPending ? "Saving..." : "Save Changes"}
-                </button>
+                  Save Changes
+                </Button>
                 {updateUser.isError && (
                   <p className="text-xs text-primary">{(updateUser.error as any)?.message || "Update failed"}</p>
                 )}

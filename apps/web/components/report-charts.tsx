@@ -1,4 +1,18 @@
-import { Line, LineChart, ResponsiveContainer, XAxis, YAxis, Tooltip, BarChart, Bar, PieChart, Pie, Cell } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const palette = {
   red: "#CA0B2F",
@@ -13,6 +27,7 @@ export function RevenueLine({ data }: { data: { date: string; revenue: number; e
       <p className="text-sm text-muted-foreground mb-2">Revenue vs Expenses</p>
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
           <XAxis dataKey="date" stroke={palette.gray} />
           <YAxis stroke={palette.gray} />
           <Tooltip />
@@ -35,6 +50,8 @@ export function BreakdownPie({ data }: { data: { name: string; value: number }[]
               <Cell key={idx} fill={colors[idx % colors.length]} />
             ))}
           </Pie>
+          <Tooltip />
+          <Legend />
         </PieChart>
       </ResponsiveContainer>
     </div>
@@ -47,10 +64,133 @@ export function BarTrend({ data }: { data: { name: string; net: number }[] }) {
       <p className="text-sm text-muted-foreground mb-2">Net Profit Trend</p>
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
           <XAxis dataKey="name" stroke={palette.gray} />
           <YAxis stroke={palette.gray} />
           <Tooltip />
           <Bar dataKey="net" fill={palette.red} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function CollectionsLine({
+  data,
+  title = "Billed vs Collected",
+}: {
+  data: { date: string; billed: number; collected: number }[];
+  title?: string;
+}) {
+  return (
+    <div className="glass p-4 rounded-xl h-72">
+      <p className="text-sm text-muted-foreground mb-2">{title}</p>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+          <XAxis dataKey="date" stroke={palette.gray} />
+          <YAxis stroke={palette.gray} />
+          <Tooltip />
+          <Legend />
+          <Line type="monotone" dataKey="billed" stroke={palette.red} strokeWidth={2} />
+          <Line type="monotone" dataKey="collected" stroke={palette.blue} strokeWidth={2} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function SnapshotBars({
+  data,
+  title = "Receivables vs Payables",
+}: {
+  data: { name: string; value: number }[];
+  title?: string;
+}) {
+  return (
+    <div className="glass p-4 rounded-xl h-72">
+      <p className="text-sm text-muted-foreground mb-2">{title}</p>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+          <XAxis dataKey="name" stroke={palette.gray} />
+          <YAxis stroke={palette.gray} />
+          <Tooltip />
+          <Bar dataKey="value">
+            {data.map((entry, idx) => (
+              <Cell key={entry.name} fill={idx === 0 ? palette.blue : palette.red} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function AgingBars({
+  data,
+  title,
+}: {
+  data: { name: string; value: number }[];
+  title: string;
+}) {
+  return (
+    <div className="glass p-4 rounded-xl h-72">
+      <p className="text-sm text-muted-foreground mb-2">{title}</p>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+          <XAxis dataKey="name" stroke={palette.gray} />
+          <YAxis stroke={palette.gray} />
+          <Tooltip />
+          <Bar dataKey="value">
+            {data.map((entry, idx) => (
+              <Cell
+                key={entry.name}
+                fill={
+                  idx <= 1
+                    ? palette.blue
+                    : idx === 2
+                      ? palette.gray
+                      : palette.red
+                }
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function ProfitBridge({
+  data,
+}: {
+  data: { name: string; value: number }[];
+}) {
+  return (
+    <div className="glass p-4 rounded-xl h-72">
+      <p className="text-sm text-muted-foreground mb-2">Profit Bridge</p>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+          <XAxis dataKey="name" stroke={palette.gray} />
+          <YAxis stroke={palette.gray} />
+          <Tooltip />
+          <Bar dataKey="value">
+            {data.map((entry) => (
+              <Cell
+                key={entry.name}
+                fill={
+                  entry.name === "Revenue"
+                    ? palette.red
+                    : entry.name === "Net Profit"
+                      ? palette.blue
+                      : palette.gray
+                }
+              />
+            ))}
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>

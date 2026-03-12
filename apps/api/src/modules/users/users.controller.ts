@@ -62,6 +62,12 @@ class VerifyOtpDto {
 export class UsersController {
   constructor(private usersService: UsersService) {}
 
+  private ensureBootstrapEnabled() {
+    if (process.env.ALLOW_BOOTSTRAP_ENDPOINTS !== "true") {
+      throw new ForbiddenException("Bootstrap endpoints are disabled");
+    }
+  }
+
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Get()
   @PermissionsRequired(Permissions.USERS_READ)
@@ -85,6 +91,7 @@ export class UsersController {
   // temporary bootstrap endpoint to seed first admin when no users exist
   @Post("seed-initial-admin")
   async seedInitial(@Body() body: BootstrapSeedDto) {
+    this.ensureBootstrapEnabled();
     const secret = process.env.BOOTSTRAP_SECRET;
     if (!secret || body.secret !== secret) {
       throw new ForbiddenException("Invalid bootstrap secret");
@@ -99,6 +106,7 @@ export class UsersController {
   // temporary bootstrap password reset (requires secret)
   @Post("bootstrap-reset-password")
   async bootstrapReset(@Body() body: { email: string; newPassword: string; secret?: string }) {
+    this.ensureBootstrapEnabled();
     const secret = process.env.BOOTSTRAP_SECRET;
     if (!secret || body.secret !== secret) {
       throw new ForbiddenException("Invalid bootstrap secret");

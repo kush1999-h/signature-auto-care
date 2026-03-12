@@ -5,7 +5,14 @@ import { useQuery } from "@tanstack/react-query";
 import Shell from "../../components/shell";
 import api, { getPdfBaseUrl } from "../../lib/api-client";
 import { MetricCard } from "../../components/metric-card";
-import { BreakdownPie, RevenueLine, BarTrend } from "../../components/report-charts";
+import {
+  AgingBars,
+  BreakdownPie,
+  CollectionsLine,
+  ProfitBridge,
+  RevenueLine,
+  BarTrend,
+} from "../../components/report-charts";
 import { SegmentedControl } from "../../components/ui/segmented-control";
 import { Input } from "../../components/ui/input";
 import { EmptyState } from "../../components/ui/empty-state";
@@ -17,6 +24,9 @@ import { Table, THead, TBody, TR, TH, TD } from "../../components/ui/table";
 import { useToast } from "../../components/ui/toast";
 import { useAuth } from "../../lib/auth-context";
 import { calcInvoiceCogs, calcInvoiceRevenue, sumByDate, sumByMonth } from "../../lib/finance";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
+import { CollapsibleSection } from "../../components/collapsible-section";
 
 type ProfitSummary = {
   revenue?: number;
@@ -70,6 +80,25 @@ type PayableRow = {
   createdByName?: string;
   createdByRole?: string;
   note?: string;
+};
+
+type AgingRow = {
+  _id: string;
+  outstandingAmount?: number;
+  amount?: number;
+  bucket?: string;
+  dueDate?: string;
+  daysOverdue?: number;
+  customerId?: string;
+  invoiceNumber?: string;
+  vendorName?: string;
+};
+
+type FinanceActivityRow = {
+  id: string;
+  type: string;
+  date?: string;
+  amount?: number;
 };
 
 function formatRelative(date: Date) {
@@ -158,6 +187,32 @@ export default function ReportsPage() {
     queryKey: ["expenses"],
     queryFn: async () => (await api.get("/expenses")).data as ExpenseRow[],
     enabled: Boolean(canReadExpenses)
+  });
+  const receivablesAgingQuery = useQuery({
+    queryKey: ["reports-receivables-aging", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/receivables-aging", { params: { from: rangeDates.from, to: rangeDates.to } })).data as {
+        totals: Record<string, number>;
+        rows: AgingRow[];
+      },
+    enabled: canReadProfit
+  });
+  const payablesAgingQuery = useQuery({
+    queryKey: ["reports-payables-aging", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/payables-aging", { params: { from: rangeDates.from, to: rangeDates.to } })).data as {
+        totals: Record<string, number>;
+        rows: AgingRow[];
+      },
+    enabled: canReadProfit
+  });
+  const financeActivityQuery = useQuery({
+    queryKey: ["reports-finance-activity", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/finance-activity", { params: { from: rangeDates.from, to: rangeDates.to, limit: 100 } })).data as {
+        rows: FinanceActivityRow[];
+      },
+    enabled: canReadProfit
   });
 
   useEffect(() => {
@@ -251,6 +306,70 @@ export default function ReportsPage() {
       .sort((a, b) => calcInvoiceRevenue(b) - calcInvoiceRevenue(a))
       .slice(0, 5);
   }, [invoices]);
+  const collectionsByDateMap = useMemo(() => {
+    const rows = financeActivityQuery.data?.rows || [];
+    return sumByDate(
+      rows
+        .filter((row) => row.type === "PAYMENT" || row.type === "REFUND")
+        .map((row) => ({
+          date: row.date || "",
+          amount: row.type === "REFUND" ? -Number(row.amount || 0) : Number(row.amount || 0),
+        }))
+    );
+  }, [financeActivityQuery.data]);
+  const billedVsCollected = useMemo(() => {
+    const dates = Array.from(
+      new Set([...Object.keys(revenueByDateMap), ...Object.keys(collectionsByDateMap)])
+    ).sort();
+    return dates.map((date) => ({
+      date,
+      billed: revenueByDateMap[date] || 0,
+      collected: collectionsByDateMap[date] || 0,
+    }));
+  }, [collectionsByDateMap, revenueByDateMap]);
+  const receivablesAgingBars = useMemo(() => {
+    const totals = receivablesAgingQuery.data?.totals || {};
+    return [
+      { name: "Current", value: Number(totals.CURRENT || 0) },
+      { name: "1-30", value: Number(totals["1_30"] || 0) },
+      { name: "31-60", value: Number(totals["31_60"] || 0) },
+      { name: "61-90", value: Number(totals["61_90"] || 0) },
+      { name: "90+", value: Number(totals["90_PLUS"] || 0) },
+    ];
+  }, [receivablesAgingQuery.data]);
+  const payablesAgingBars = useMemo(() => {
+    const totals = payablesAgingQuery.data?.totals || {};
+    return [
+      { name: "Current", value: Number(totals.CURRENT || 0) },
+      { name: "1-30", value: Number(totals["1_30"] || 0) },
+      { name: "31-60", value: Number(totals["31_60"] || 0) },
+      { name: "61-90", value: Number(totals["61_90"] || 0) },
+      { name: "90+", value: Number(totals["90_PLUS"] || 0) },
+    ];
+  }, [payablesAgingQuery.data]);
+  const profitBridgeData = useMemo(
+    () => [
+      { name: "Revenue", value: Number(summary.revenue || 0) },
+      { name: "COGS", value: Number(summary.cogs || 0) },
+      { name: "Expenses", value: Number(summary.expenses || 0) },
+      { name: "Net Profit", value: Number(summary.netProfit || 0) },
+    ],
+    [summary.cogs, summary.expenses, summary.netProfit, summary.revenue]
+  );
+  const topReceivables = useMemo(
+    () =>
+      [...(receivablesAgingQuery.data?.rows || [])]
+        .sort((a, b) => Number(b.outstandingAmount || 0) - Number(a.outstandingAmount || 0))
+        .slice(0, 5),
+    [receivablesAgingQuery.data]
+  );
+  const topPayables = useMemo(
+    () =>
+      [...(payablesAgingQuery.data?.rows || [])]
+        .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+        .slice(0, 5),
+    [payablesAgingQuery.data]
+  );
 
   const filteredExpenses = useMemo(() => {
     const allExpenses = expensesQuery.data || [];
@@ -369,17 +488,24 @@ export default function ReportsPage() {
 
   return (
     <Shell>
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Reports</h1>
-          <p className="text-muted-foreground text-sm">Sales, profit, and inventory at a glance.</p>
-          <div className="text-xs text-muted-foreground mt-2 flex flex-wrap gap-2">
+      <PageHeader
+        title="Reports"
+        description="Sales, profit, and inventory at a glance."
+        meta={
+          <>
             <span>Range: {rangeDates.label}</span>
             {lastUpdated && <span title={lastUpdated.toLocaleString()}>Last updated {formatRelative(lastUpdated)}</span>}
             {isBusy && <span className="text-primary">Refreshing...</span>}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+          </>
+        }
+        actions={
+          <Button onClick={handleExportPdf} disabled={exportDisabled} title={exportTitle}>
+            {pdfPending ? "Exporting..." : "Export Profit PDF"}
+          </Button>
+        }
+      />
+      <PageToolbar>
+        <PageToolbarSection>
           <SegmentedControl
             aria-label="Report range"
             options={[
@@ -393,51 +519,52 @@ export default function ReportsPage() {
             onChange={(val) => setRange(val as typeof range)}
             disabled={isBusy}
           />
-          <label className="text-[11px] text-muted-foreground">
-            <span>From</span>
-            <Input
-              type="date"
-              value={customFrom}
-              onChange={(e) => {
-                setCustomFrom(e.target.value);
-                setRange("custom");
-              }}
-              className="mt-1 h-8"
-              disabled={isBusy}
-            />
-          </label>
-          <label className="text-[11px] text-muted-foreground">
-            <span>To</span>
-            <Input
-              type="date"
-              value={customTo}
-              onChange={(e) => {
-                setCustomTo(e.target.value);
-                setRange("custom");
-              }}
-              className="mt-1 h-8"
-              disabled={isBusy}
-            />
-          </label>
-          {(customFrom || customTo) && (
-            <Button
-              variant="ghost"
-              className="h-8"
-              onClick={() => {
-                setCustomFrom("");
-                setCustomTo("");
-                setRange("month");
-              }}
-              disabled={isBusy}
-            >
-              Reset dates
-            </Button>
-          )}
-          <Button onClick={handleExportPdf} disabled={exportDisabled} title={exportTitle}>
-            {pdfPending ? "Exporting..." : "Export Profit PDF"}
-          </Button>
-        </div>
-      </div>
+        </PageToolbarSection>
+        {range === "custom" && (
+          <PageToolbarSection align="end">
+            <label className="text-[11px] text-muted-foreground">
+              <span>From</span>
+              <Input
+                type="date"
+                value={customFrom}
+                onChange={(e) => {
+                  setCustomFrom(e.target.value);
+                  setRange("custom");
+                }}
+                className="mt-1 h-8"
+                disabled={isBusy}
+              />
+            </label>
+            <label className="text-[11px] text-muted-foreground">
+              <span>To</span>
+              <Input
+                type="date"
+                value={customTo}
+                onChange={(e) => {
+                  setCustomTo(e.target.value);
+                  setRange("custom");
+                }}
+                className="mt-1 h-8"
+                disabled={isBusy}
+              />
+            </label>
+            {(customFrom || customTo) && (
+              <Button
+                variant="ghost"
+                className="h-8"
+                onClick={() => {
+                  setCustomFrom("");
+                  setCustomTo("");
+                  setRange("month");
+                }}
+                disabled={isBusy}
+              >
+                Reset dates
+              </Button>
+            )}
+          </PageToolbarSection>
+        )}
+      </PageToolbar>
 
       {!canReadProfit ? (
         <EmptyState
@@ -455,18 +582,22 @@ export default function ReportsPage() {
         />
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-            <MetricCard title="Revenue" value={`Tk. ${formatMoney(summary.revenue)}`} />
-            <MetricCard title="COGS" value={`Tk. ${formatMoney(summary.cogs)}`} accent="gray" />
-            <MetricCard
-              title="Operating expenses"
-              value={`Tk. ${formatMoney(summary.expenses)}`}
-              subtitle={expenseSubtitle}
-              accent="gray"
-            />
-            <MetricCard title="Gross Profit" value={`Tk. ${formatMoney(summary.grossProfit)}`} accent="blue" />
-            <MetricCard title="Net Profit" value={`Tk. ${formatMoney(summary.netProfit)}`} />
-          </div>
+          <CollapsibleSection
+            title="Summary KPIs"
+            description="Top-line financial view for the selected range."
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <MetricCard title="Revenue" value={`Tk. ${formatMoney(summary.revenue)}`} />
+              <MetricCard title="COGS" value={`Tk. ${formatMoney(summary.cogs)}`} accent="gray" />
+              <MetricCard
+                title="Operating expenses"
+                value={`Tk. ${formatMoney(summary.expenses)}`}
+                subtitle={expenseSubtitle}
+                accent="gray"
+              />
+              <MetricCard title="Gross Profit" value={`Tk. ${formatMoney(summary.grossProfit)}`} accent="blue" />
+              <MetricCard title="Net Profit" value={`Tk. ${formatMoney(summary.netProfit)}`} />
+            </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="glass p-4 rounded-xl space-y-2">
@@ -487,9 +618,14 @@ export default function ReportsPage() {
               <p className="text-sm text-muted-foreground">Other Tk. {formatMoney(otherRevenue)}</p>
             </div>
           </div>
+          </CollapsibleSection>
         </>
       )}
 
+      <CollapsibleSection
+        title="Trend visuals"
+        description="Revenue, expense, and mix visualizations."
+      >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {!canReadSales || !canReadProfit ? (
           <>
@@ -535,7 +671,26 @@ export default function ReportsPage() {
           </>
         )}
       </div>
+      </CollapsibleSection>
 
+      <CollapsibleSection
+        title="Aging and collection control"
+        description="Overdue exposure and billing vs collection movement."
+      >
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {receivablesAgingQuery.isLoading ? <ChartSkeleton /> : <AgingBars data={receivablesAgingBars} title="Receivables Aging" />}
+          {payablesAgingQuery.isLoading ? <ChartSkeleton /> : <AgingBars data={payablesAgingBars} title="Payables Aging" />}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {financeActivityQuery.isLoading ? <ChartSkeleton /> : <CollectionsLine data={billedVsCollected} title="Billed vs Collected" />}
+          <ProfitBridge data={profitBridgeData} />
+        </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Detailed highlights"
+        description="Top invoices, top dues, and monthly net trend."
+      >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="glass p-4 rounded-xl space-y-3 lg:col-span-2">
           <div className="flex items-center justify-between">
@@ -585,15 +740,66 @@ export default function ReportsPage() {
           )}
         </div>
       </div>
+      </CollapsibleSection>
 
+      <CollapsibleSection
+        title="Top dues"
+        description="Largest open customer and supplier balances."
+      >
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="glass p-4 rounded-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="font-semibold text-foreground">Top receivables</p>
+            <span className="text-xs text-muted-foreground">Highest unpaid invoices</span>
+          </div>
+          <div className="space-y-2">
+            {topReceivables.length === 0 && <p className="text-sm text-muted-foreground">No open receivables.</p>}
+            {topReceivables.map((row) => (
+              <div key={row._id} className="rounded-lg border border-border px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-foreground">{row.invoiceNumber || row._id}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Due {row.dueDate ? new Date(row.dueDate).toLocaleDateString() : "--"} • {row.daysOverdue || 0} days
+                    </p>
+                  </div>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(row.outstandingAmount)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="glass p-4 rounded-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="font-semibold text-foreground">Top payables</p>
+            <span className="text-xs text-muted-foreground">Largest open supplier balances</span>
+          </div>
+          <div className="space-y-2">
+            {topPayables.length === 0 && <p className="text-sm text-muted-foreground">No open payables.</p>}
+            {topPayables.map((row) => (
+              <div key={row._id} className="rounded-lg border border-border px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-foreground">{row.vendorName || row._id}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Due {row.dueDate ? new Date(row.dueDate).toLocaleDateString() : "--"} • {row.daysOverdue || 0} days
+                    </p>
+                  </div>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(row.amount)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Detailed finance tables"
+        description={`Tables reflect ${rangeDates.label}. Operating expenses exclude inventory purchases.`}
+      >
       <div className="glass p-4 rounded-xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-          <p className="font-semibold text-foreground">Sales & Expenses</p>
-          <p className="text-xs text-muted-foreground">
-            Tables reflect the selected range. Operating expenses exclude inventory purchases.
-          </p>
-          </div>
           <span className="text-xs text-muted-foreground">Range: {rangeDates.label}</span>
         </div>
 
@@ -619,7 +825,7 @@ export default function ReportsPage() {
                     <TH>Date Out</TH>
                     <TH>Invoice</TH>
                     <TH>Work Order</TH>
-                    <TH>Revenue</TH>
+                    <TH className="text-right">Revenue</TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -628,12 +834,12 @@ export default function ReportsPage() {
                       <TD>{new Date(invoiceDateOut(inv)).toLocaleDateString()}</TD>
                       <TD>{inv.invoiceNumber || inv._id}</TD>
                       <TD>{inv.workOrderId || "--"}</TD>
-                      <TD className="font-semibold text-foreground">Tk. {calcInvoiceRevenue(inv).toFixed(2)}</TD>
+                      <TD className="text-right font-semibold text-foreground">Tk. {calcInvoiceRevenue(inv).toFixed(2)}</TD>
                     </TR>
                   ))}
                   <TR>
                     <TD colSpan={3} className="text-right font-semibold text-foreground">Total</TD>
-                    <TD className="font-semibold text-foreground">Tk. {salesTotal.toFixed(2)}</TD>
+                    <TD className="text-right font-semibold text-foreground">Tk. {salesTotal.toFixed(2)}</TD>
                   </TR>
                 </TBody>
               </Table>
@@ -663,7 +869,7 @@ export default function ReportsPage() {
                     <TH>Date</TH>
                     <TH>Category</TH>
                     <TH>Note</TH>
-                    <TH>Amount</TH>
+                    <TH className="text-right">Amount</TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -672,12 +878,12 @@ export default function ReportsPage() {
                       <TD>{exp.expenseDate ? new Date(exp.expenseDate).toLocaleDateString() : "--"}</TD>
                       <TD>{exp.category || "Expense"}</TD>
                       <TD>{exp.note || "--"}</TD>
-                      <TD className="font-semibold text-foreground">Tk. {Number(exp.amount || 0).toFixed(2)}</TD>
+                      <TD className="text-right font-semibold text-foreground">Tk. {Number(exp.amount || 0).toFixed(2)}</TD>
                     </TR>
                   ))}
                   <TR>
                     <TD colSpan={3} className="text-right font-semibold text-foreground">Total</TD>
-                    <TD className="font-semibold text-foreground">Tk. {expensesTotal.toFixed(2)}</TD>
+                    <TD className="text-right font-semibold text-foreground">Tk. {expensesTotal.toFixed(2)}</TD>
                   </TR>
                 </TBody>
               </Table>
@@ -707,7 +913,7 @@ export default function ReportsPage() {
                     <TH>Date</TH>
                     <TH>Vendor</TH>
                     <TH>Note</TH>
-                    <TH>Amount</TH>
+                    <TH className="text-right">Amount</TH>
                     <TH>Status</TH>
                   </TR>
                 </THead>
@@ -717,13 +923,13 @@ export default function ReportsPage() {
                       <TD>{p.purchaseDate ? new Date(p.purchaseDate).toLocaleDateString() : "--"}</TD>
                       <TD>{p.vendorName || "--"}</TD>
                       <TD>{p.note || "--"}</TD>
-                      <TD className="font-semibold text-foreground">Tk. {Number(p.amount || 0).toFixed(2)}</TD>
-                      <TD>{(p.status || "OPEN").toUpperCase()}</TD>
+                      <TD className="text-right font-semibold text-foreground">Tk. {Number(p.amount || 0).toFixed(2)}</TD>
+                      <TD><span className={String(p.status || "OPEN").toUpperCase() === "PAID" ? "text-muted-foreground" : "text-[var(--warning-text)]"}>{(p.status || "OPEN").toUpperCase()}</span></TD>
                     </TR>
                   ))}
                   <TR>
                     <TD colSpan={3} className="text-right font-semibold text-foreground">Open total</TD>
-                    <TD className="font-semibold text-foreground">Tk. {payablesTotal.toFixed(2)}</TD>
+                    <TD className="text-right font-semibold text-foreground">Tk. {payablesTotal.toFixed(2)}</TD>
                     <TD />
                   </TR>
                 </TBody>
@@ -732,6 +938,7 @@ export default function ReportsPage() {
           )}
         </div>
       </div>
+      </CollapsibleSection>
     </Shell>
   );
 }

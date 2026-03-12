@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post, UseGuards } from "@nestjs/common";
 import { InvoicesService } from "./invoices.service";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { PermissionsGuard } from "../../common/guards/permissions.guard";
@@ -17,6 +17,16 @@ type CounterSaleBody = {
   payment: { method: string; amount: number };
 };
 
+type RefundBody = {
+  amount: number;
+  method: string;
+  note?: string;
+};
+
+type ReasonBody = {
+  reason: string;
+};
+
 @Controller()
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class InvoicesController {
@@ -26,6 +36,12 @@ export class InvoicesController {
   @PermissionsRequired(Permissions.INVOICES_READ)
   list() {
     return this.invoices.list();
+  }
+
+  @Get("invoices/:id/payments")
+  @PermissionsRequired(Permissions.PAYMENTS_READ)
+  listPayments(@Param("id") id: string) {
+    return this.invoices.listPayments(id);
   }
 
   @Post("invoices")
@@ -43,6 +59,44 @@ export class InvoicesController {
       invoiceId: id,
       payment: body.payment,
       performedBy
+    });
+  }
+
+  @Post("invoices/:id/void")
+  @PermissionsRequired(Permissions.INVOICES_CLOSE)
+  voidInvoice(@Param("id") id: string, @Body() body: ReasonBody, @CurrentUser() user: AuthUser) {
+    const performedBy = user.userId || user.sub;
+    if (!performedBy) throw new Error("User ID not found");
+    if (!body.reason?.trim()) throw new BadRequestException("Reason is required");
+    return this.invoices.voidInvoice(id, body.reason.trim(), {
+      userId: performedBy,
+      name: user.name,
+      role: user.role,
+    });
+  }
+
+  @Post("invoices/:id/refund")
+  @PermissionsRequired(Permissions.PAYMENTS_CREATE)
+  refundInvoice(@Param("id") id: string, @Body() body: RefundBody, @CurrentUser() user: AuthUser) {
+    const performedBy = user.userId || user.sub;
+    if (!performedBy) throw new Error("User ID not found");
+    return this.invoices.refundInvoice(id, body, {
+      userId: performedBy,
+      name: user.name,
+      role: user.role,
+    });
+  }
+
+  @Post("payments/:id/void")
+  @PermissionsRequired(Permissions.PAYMENTS_CREATE)
+  voidPayment(@Param("id") id: string, @Body() body: ReasonBody, @CurrentUser() user: AuthUser) {
+    const performedBy = user.userId || user.sub;
+    if (!performedBy) throw new Error("User ID not found");
+    if (!body.reason?.trim()) throw new BadRequestException("Reason is required");
+    return this.invoices.voidPayment(id, body.reason.trim(), {
+      userId: performedBy,
+      name: user.name,
+      role: user.role,
     });
   }
 

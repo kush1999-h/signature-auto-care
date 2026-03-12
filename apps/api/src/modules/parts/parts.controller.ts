@@ -50,12 +50,14 @@ export class PartsController {
   list(
     @Query("search") search?: string,
     @Query("page") page?: number,
-    @Query("limit") limit?: number
+    @Query("limit") limit?: number,
+    @Query("includeArchived") includeArchived?: string
   ) {
     return this.parts.list({
       search,
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
+      includeArchived: includeArchived === "true",
     });
   }
 
@@ -97,6 +99,26 @@ export class PartsController {
     return this.parts.update(id, {
       sellingPrice: Number(body.sellingPrice),
       performedByEmployeeId: user.userId,
+    });
+  }
+
+  @Patch("parts/:id/archive")
+  @PermissionsRequired(Permissions.PARTS_UPDATE)
+  archive(@Param("id") id: string, @CurrentUser() user: AuthUser) {
+    return this.parts.setArchived(id, true, {
+      performedByEmployeeId: user.userId,
+      performedByName: user?.name,
+      performedByRole: user?.role,
+    });
+  }
+
+  @Patch("parts/:id/unarchive")
+  @PermissionsRequired(Permissions.PARTS_UPDATE)
+  unarchive(@Param("id") id: string, @CurrentUser() user: AuthUser) {
+    return this.parts.setArchived(id, false, {
+      performedByEmployeeId: user.userId,
+      performedByName: user?.name,
+      performedByRole: user?.role,
     });
   }
 

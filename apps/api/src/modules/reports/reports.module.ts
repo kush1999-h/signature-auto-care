@@ -11,6 +11,8 @@ import {
   ExpenseSchema,
   Payable,
   PayableSchema,
+  VendorPayment,
+  VendorPaymentSchema,
   InventoryTransaction,
   InventoryTransactionSchema
 } from "../../schemas";
@@ -25,6 +27,7 @@ import { ReportsController } from "./reports.controller";
       { name: WorkOrder.name, schema: WorkOrderSchema },
       { name: Expense.name, schema: ExpenseSchema },
       { name: Payable.name, schema: PayableSchema },
+      { name: VendorPayment.name, schema: VendorPaymentSchema },
       { name: InventoryTransaction.name, schema: InventoryTransactionSchema }
     ])
   ],

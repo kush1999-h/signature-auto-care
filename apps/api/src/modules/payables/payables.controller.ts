@@ -46,4 +46,10 @@ export class PayablesController {
       performedByRole: user.role
     });
   }
+
+  @Get(":id/payments")
+  @PermissionsRequired(Permissions.PAYABLES_READ)
+  listVendorPayments(@Param("id") id: string) {
+    return this.payables.listVendorPayments(id);
+  }
 }

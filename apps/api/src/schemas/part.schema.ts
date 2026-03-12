@@ -43,6 +43,15 @@ export class Part {
 
   @Prop({ default: 0 })
   reservedQty!: number;
+
+  @Prop({ default: false })
+  isArchived!: boolean;
+
+  @Prop()
+  archivedAt?: Date;
+
+  @Prop({ type: Types.ObjectId, ref: "User" })
+  archivedBy?: Types.ObjectId;
 }
 
 export const PartSchema = SchemaFactory.createForClass(Part);

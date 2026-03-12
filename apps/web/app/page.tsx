@@ -5,7 +5,14 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "../lib/auth-context";
 import Shell from "../components/shell";
 import { MetricCard } from "../components/metric-card";
-import { BreakdownPie, RevenueLine, BarTrend } from "../components/report-charts";
+import {
+  AgingBars,
+  BreakdownPie,
+  CollectionsLine,
+  RevenueLine,
+  SnapshotBars,
+  BarTrend,
+} from "../components/report-charts";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import api from "../lib/api-client";
 import { Button } from "../components/ui/button";
@@ -18,6 +25,9 @@ import { MetricSkeletonGrid } from "../components/ui/metric-skeleton";
 import { ArrowDownRight, ArrowRight, ArrowUpRight } from "lucide-react";
 import { Input } from "../components/ui/input";
 import { calcInvoiceCogs, calcInvoiceRevenue, sumByDate, sumByMonth } from "../lib/finance";
+import { PageHeader } from "../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../components/page-toolbar";
+import { CollapsibleSection } from "../components/collapsible-section";
 
 type ProfitReport = {
   revenue?: number;
@@ -25,6 +35,9 @@ type ProfitReport = {
   grossProfit?: number;
   expenses?: number;
   cashExpenses?: number;
+  cashCollected?: number;
+  bankCollected?: number;
+  receivables?: number;
   creditPurchases?: number;
   openPayables?: number;
   netProfit?: number;
@@ -39,6 +52,30 @@ type InvoiceSummary = {
   tax?: number;
   lineItems?: { type?: string; total?: number; quantity?: number; costAtTime?: number }[];
 };
+
+type AgingRow = {
+  _id: string;
+  invoiceNumber?: string;
+  customerId?: string;
+  workOrderId?: string;
+  outstandingAmount?: number;
+  dueDate?: string;
+  daysOverdue?: number;
+  bucket?: string;
+};
+
+type FinanceActivityRow = {
+  id: string;
+  type: string;
+  date?: string;
+  amount?: number;
+  method?: string;
+  invoiceNumber?: string;
+  vendorName?: string;
+  note?: string;
+};
+
+type CustomerSummary = { _id: string; name?: string; phone?: string };
 
 function formatRelative(date: Date) {
   const diffSeconds = Math.floor((Date.now() - date.getTime()) / 1000);
@@ -74,6 +111,7 @@ export default function Dashboard() {
   const canReadProfit = permissions.includes("REPORTS_READ_PROFIT");
   const canReadSales = permissions.includes("REPORTS_READ_SALES");
   const canReadPayables = permissions.includes("PAYABLES_READ");
+  const canReadCustomers = permissions.includes("CUSTOMERS_READ");
   const canViewReports = canReadProfit || canReadSales;
   const isAdminLike = ["OWNER_ADMIN", "OPS_MANAGER"].includes(role || "");
   const isAccountant = role === "ACCOUNTANT";
@@ -144,6 +182,37 @@ export default function Dashboard() {
     },
     enabled: canShowAdminDashboard && canReadSales
   });
+  const receivablesAgingQuery = useQuery({
+    queryKey: ["receivables-aging", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/receivables-aging", { params: { from: rangeDates.from, to: rangeDates.to } })).data as {
+        totals: Record<string, number>;
+        rows: AgingRow[];
+      },
+    enabled: canShowAdminDashboard && canReadProfit
+  });
+  const payablesAgingQuery = useQuery({
+    queryKey: ["payables-aging", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/payables-aging", { params: { from: rangeDates.from, to: rangeDates.to } })).data as {
+        totals: Record<string, number>;
+        rows: { amount?: number; bucket?: string }[];
+      },
+    enabled: canShowAdminDashboard && canReadProfit
+  });
+  const financeActivityQuery = useQuery({
+    queryKey: ["finance-activity", rangeDates.from, rangeDates.to],
+    queryFn: async () =>
+      (await api.get("/reports/finance-activity", { params: { from: rangeDates.from, to: rangeDates.to, limit: 20 } })).data as {
+        rows: FinanceActivityRow[];
+      },
+    enabled: canShowAdminDashboard && canReadProfit
+  });
+  const customersQuery = useQuery({
+    queryKey: ["dashboard-customers"],
+    queryFn: async () => (await api.get("/customers")).data as CustomerSummary[],
+    enabled: canShowAdminDashboard && canReadCustomers
+  });
 
   useEffect(() => {
     if ((canReadProfit && profitQuery.data) || (canReadSales && salesQuery.data)) {
@@ -161,6 +230,13 @@ export default function Dashboard() {
     typeof reportRaw.creditPurchases === "number" ? reportRaw.creditPurchases : 0;
   const openPayablesVal =
     typeof reportRaw.openPayables === "number" ? reportRaw.openPayables : creditPurchasesVal;
+  const receivablesVal =
+    typeof reportRaw.receivables === "number" ? reportRaw.receivables : 0;
+  const cashCollectedVal =
+    typeof reportRaw.cashCollected === "number" ? reportRaw.cashCollected : 0;
+  const bankCollectedVal =
+    typeof reportRaw.bankCollected === "number" ? reportRaw.bankCollected : 0;
+  const totalCollectedVal = cashCollectedVal + bankCollectedVal;
   const expensesVal =
     typeof reportRaw.expenses === "number" ? reportRaw.expenses : cashExpensesVal;
   const netVal = reportRaw.netProfit ?? grossVal - expensesVal;
@@ -170,6 +246,10 @@ export default function Dashboard() {
     grossProfit: grossVal,
     expenses: expensesVal,
     cashExpenses: cashExpensesVal,
+    cashCollected: cashCollectedVal,
+    bankCollected: bankCollectedVal,
+    totalCollected: totalCollectedVal,
+    receivables: receivablesVal,
     creditPurchases: creditPurchasesVal,
     openPayables: openPayablesVal,
     netProfit: netVal
@@ -239,6 +319,54 @@ export default function Dashboard() {
       net: (revenueMap[name] || 0) - (cogsMap[name] || 0) - (expenseMap[name] || 0)
     }));
   }, [expenseItems, invoices]);
+  const collectionsByDateMap = useMemo(() => {
+    const rows = financeActivityQuery.data?.rows || [];
+    return sumByDate(
+      rows
+        .filter((row) => row.type === "PAYMENT" || row.type === "REFUND")
+        .map((row) => ({
+          date: row.date || "",
+          amount: row.type === "REFUND" ? -Number(row.amount || 0) : Number(row.amount || 0),
+        }))
+    );
+  }, [financeActivityQuery.data]);
+  const billedVsCollected = useMemo(() => {
+    const dates = Array.from(
+      new Set([...Object.keys(revenueByDateMap), ...Object.keys(collectionsByDateMap)])
+    ).sort();
+    return dates.map((date) => ({
+      date,
+      billed: revenueByDateMap[date] || 0,
+      collected: collectionsByDateMap[date] || 0,
+    }));
+  }, [collectionsByDateMap, revenueByDateMap]);
+  const customerMap = useMemo(
+    () => new Map((customersQuery.data || []).map((customer) => [customer._id, customer])),
+    [customersQuery.data]
+  );
+  const topDueCustomers = useMemo(() => {
+    return [...(receivablesAgingQuery.data?.rows || [])]
+      .sort((a, b) => Number(b.outstandingAmount || 0) - Number(a.outstandingAmount || 0))
+      .slice(0, 5);
+  }, [receivablesAgingQuery.data]);
+  const receivablesSnapshot = useMemo(
+    () => [
+      { name: "Receivables", value: Number(report.receivables || 0) },
+      { name: "Payables", value: Number(report.openPayables || 0) },
+    ],
+    [report.openPayables, report.receivables]
+  );
+  const receivablesAgingBars = useMemo(() => {
+    const totals = receivablesAgingQuery.data?.totals || {};
+    return [
+      { name: "Current", value: Number(totals.CURRENT || 0) },
+      { name: "1-30", value: Number(totals["1_30"] || 0) },
+      { name: "31-60", value: Number(totals["31_60"] || 0) },
+      { name: "61-90", value: Number(totals["61_90"] || 0) },
+      { name: "90+", value: Number(totals["90_PLUS"] || 0) },
+    ];
+  }, [receivablesAgingQuery.data]);
+  const financeActivity = financeActivityQuery.data?.rows || [];
 
   const hasSalesData = invoices.length > 0 || pieData.some((p) => p.value > 0);
   const hasLineData = revenueVsExpenses.some((row) => row.revenue > 0 || row.expenses > 0);
@@ -285,79 +413,89 @@ export default function Dashboard() {
   });
 
   const renderTrendIcon = () => {
-    if (kpiTrend.direction === "up") return <ArrowUpRight className="h-4 w-4 text-green-400" aria-hidden />;
+    if (kpiTrend.direction === "up") return <ArrowUpRight className="h-4 w-4 text-[var(--success-text)]" aria-hidden />;
     if (kpiTrend.direction === "down") return <ArrowDownRight className="h-4 w-4 text-destructive" aria-hidden />;
     return <ArrowRight className="h-4 w-4 text-muted-foreground" aria-hidden />;
   };
 
   const adminDashboard = (
     <>
-      <div className="flex flex-wrap items-center gap-3 mb-4">
-        <SegmentedControl
-          aria-label="Dashboard range"
-          options={[
-            { value: "day", label: "Today" },
-            { value: "month", label: "This Month" },
-            { value: "year", label: "This Year" },
-            { value: "all", label: "All Time" },
-            { value: "custom", label: "Custom" }
-          ]}
-          value={range}
-          onChange={(val) => setRange(val as typeof range)}
-          disabled={isBusyCharts}
-        />
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="text-[11px] text-muted-foreground">
-            <span>From</span>
-            <Input
-              type="date"
-              value={customFrom}
-              onChange={(e) => {
-                setCustomFrom(e.target.value);
-                setRange("custom");
-              }}
-              className="mt-1 h-8"
-              disabled={isBusyCharts}
-            />
-          </label>
-          <label className="text-[11px] text-muted-foreground">
-            <span>To</span>
-            <Input
-              type="date"
-              value={customTo}
-              onChange={(e) => {
-                setCustomTo(e.target.value);
-                setRange("custom");
-              }}
-              className="mt-1 h-8"
-              disabled={isBusyCharts}
-            />
-          </label>
-          {(customFrom || customTo) && (
-            <Button
-              variant="ghost"
-              className="h-8"
-              onClick={() => {
-                setCustomFrom("");
-                setCustomTo("");
-                setRange("month");
-              }}
-              disabled={isBusyCharts}
-            >
-              Reset dates
-            </Button>
-          )}
-        </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>Range: {rangeDates.label}</span>
-          {lastUpdated && (
-            <span title={lastUpdated.toLocaleString()}>
-              Last updated {formatRelative(lastUpdated)}
-            </span>
-          )}
-          {isBusyCharts && <span className="text-primary">Loading...</span>}
-        </div>
-      </div>
+      <PageHeader
+        title="Dashboard"
+        description="Track sales, collections, liabilities, and quick operational signals."
+        meta={
+          <>
+            <span>Range: {rangeDates.label}</span>
+            {lastUpdated && (
+              <span title={lastUpdated.toLocaleString()}>
+                Last updated {formatRelative(lastUpdated)}
+              </span>
+            )}
+            {isBusyCharts && <span className="text-primary">Loading...</span>}
+          </>
+        }
+      />
+      <PageToolbar>
+        <PageToolbarSection>
+          <SegmentedControl
+            aria-label="Dashboard range"
+            options={[
+              { value: "day", label: "Today" },
+              { value: "month", label: "This Month" },
+              { value: "year", label: "This Year" },
+              { value: "all", label: "All Time" },
+              { value: "custom", label: "Custom" }
+            ]}
+            value={range}
+            onChange={(val) => setRange(val as typeof range)}
+            disabled={isBusyCharts}
+          />
+        </PageToolbarSection>
+        {range === "custom" && (
+          <PageToolbarSection align="end">
+            <label className="text-[11px] text-muted-foreground">
+              <span>From</span>
+              <Input
+                type="date"
+                value={customFrom}
+                onChange={(e) => {
+                  setCustomFrom(e.target.value);
+                  setRange("custom");
+                }}
+                className="mt-1 h-8"
+                disabled={isBusyCharts}
+              />
+            </label>
+            <label className="text-[11px] text-muted-foreground">
+              <span>To</span>
+              <Input
+                type="date"
+                value={customTo}
+                onChange={(e) => {
+                  setCustomTo(e.target.value);
+                  setRange("custom");
+                }}
+                className="mt-1 h-8"
+                disabled={isBusyCharts}
+              />
+            </label>
+            {(customFrom || customTo) && (
+              <Button
+                variant="ghost"
+                className="h-8"
+                onClick={() => {
+                  setCustomFrom("");
+                  setCustomTo("");
+                  setRange("month");
+                }}
+                disabled={isBusyCharts}
+              >
+                Reset dates
+              </Button>
+            )}
+          </PageToolbarSection>
+        )}
+      </PageToolbar>
 
       {!canReadProfit ? (
         <EmptyState title="Profit data restricted" description="Profit KPIs require profit report access." />
@@ -366,25 +504,56 @@ export default function Dashboard() {
       ) : profitQuery.isError ? (
         <ErrorState message={chartErrorMessage} onRetry={() => profitQuery.refetch()} />
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <MetricCard
-            title="Revenue"
-            value={`Tk. ${formatMoney(report.revenue || 0)}`}
-            subtitle="Labor + parts + other"
-            meta={
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                {renderTrendIcon()}
-                <span>{kpiTrend.change.toFixed(1)}%</span>
+        <CollapsibleSection
+          title="Financial snapshot"
+          description="Top-line sales, collections, and liability metrics for the selected range."
+        >
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Sales</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <MetricCard
+                  title="Revenue"
+                  value={`Tk. ${formatMoney(report.revenue || 0)}`}
+                  subtitle="Labor + parts + other"
+                  href="/reports"
+                  meta={
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      {renderTrendIcon()}
+                      <span>{kpiTrend.change.toFixed(1)}%</span>
+                    </div>
+                  }
+                />
+                <MetricCard title="COGS" value={`Tk. ${formatMoney(report.cogs || 0)}`} accent="gray" href="/reports" />
+                <MetricCard title="Gross Profit" value={`Tk. ${formatMoney(report.grossProfit || 0)}`} accent="blue" href="/reports" />
+                <MetricCard title="Net Profit" value={`Tk. ${formatMoney(report.netProfit || 0)}`} href="/reports" />
               </div>
-            }
-          />
-          <MetricCard title="COGS" value={`Tk. ${formatMoney(report.cogs || 0)}`} accent="gray" />
-          <MetricCard title="Gross Profit" value={`Tk. ${formatMoney(report.grossProfit || 0)}`} accent="blue" />
-          <MetricCard title="Net Profit" value={`Tk. ${formatMoney(report.netProfit || 0)}`} />
-        </div>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Collections</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <MetricCard title="Total Collected" value={`Tk. ${formatMoney(report.totalCollected || 0)}`} accent="blue" href="/invoices" />
+                <MetricCard title="Cash Collected" value={`Tk. ${formatMoney(report.cashCollected || 0)}`} accent="blue" href="/invoices" />
+                <MetricCard title="Bank Collected" value={`Tk. ${formatMoney(report.bankCollected || 0)}`} accent="blue" href="/invoices" />
+                <MetricCard title="Receivables" value={`Tk. ${formatMoney(report.receivables || 0)}`} accent="gray" href="/receivables" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Liabilities</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <MetricCard title="Open Payables" value={`Tk. ${formatMoney(report.openPayables || 0)}`} accent="red" href="/payables" />
+              </div>
+            </div>
+          </div>
+        </CollapsibleSection>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <CollapsibleSection
+        title="Sales visuals"
+        description="Revenue and revenue mix for the selected range."
+        className="mt-4"
+      >
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {!canViewCharts ? (
           <>
             <EmptyState
@@ -426,6 +595,123 @@ export default function Dashboard() {
           </>
         )}
       </div>
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Collections and liabilities"
+        description="Compare billed totals against collected totals and current exposure."
+        className="mt-4"
+      >
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {!canViewCharts ? (
+          <>
+            <EmptyState title="Collections restricted" description="Collection visuals require sales + profit access." />
+            <EmptyState title="Liability snapshot restricted" description="Liability visuals require profit access." />
+          </>
+        ) : isInitialLoadingCharts ? (
+          <>
+            <ChartSkeleton />
+            <ChartSkeleton />
+          </>
+        ) : (
+          <>
+            <div className={isBusyCharts ? "opacity-60 pointer-events-none" : ""}>
+              <CollectionsLine data={billedVsCollected} title="Billed vs Collected" />
+            </div>
+            <div className={isBusyCharts ? "opacity-60 pointer-events-none" : ""}>
+              <SnapshotBars data={receivablesSnapshot} title="Receivables vs Payables" />
+            </div>
+          </>
+        )}
+      </div>
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Collections follow-up"
+        description="Top due customers and recent finance events."
+        className="mt-4"
+      >
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="glass p-4 rounded-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="font-semibold text-foreground">Top due customers</p>
+            <Button asChild variant="outline" size="sm">
+              <a href="/receivables">View receivables</a>
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {topDueCustomers.length === 0 && (
+              <p className="text-sm text-muted-foreground">No receivables for the selected range.</p>
+            )}
+            {topDueCustomers.map((row) => {
+              const customer = row.customerId ? customerMap.get(row.customerId) : undefined;
+              return (
+                <div key={row._id} className="rounded-lg border border-border px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-foreground">{customer?.name || row.customerId || "Customer"}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {customer?.phone || "--"} • {row.invoiceNumber || row._id}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-semibold text-foreground">Tk. {formatMoney(row.outstandingAmount)}</p>
+                      <p className="text-xs text-muted-foreground">{row.daysOverdue || 0} days overdue</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="glass p-4 rounded-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="font-semibold text-foreground">Recent finance activity</p>
+            <Button asChild variant="outline" size="sm">
+              <a href="/reports">Open reports</a>
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {financeActivity.length === 0 && (
+              <p className="text-sm text-muted-foreground">No finance activity in the selected range.</p>
+            )}
+            {financeActivity.slice(0, 8).map((item) => (
+              <div key={item.id} className="rounded-lg border border-border px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-foreground">
+                      {item.type === "INVOICE_ISSUED"
+                        ? `Invoice issued ${item.invoiceNumber || ""}`
+                        : item.type === "PAYMENT"
+                          ? `Payment received ${item.invoiceNumber || ""}`
+                          : item.type === "REFUND"
+                            ? `Refund issued ${item.invoiceNumber || ""}`
+                            : item.type === "PAYMENT_VOID"
+                              ? `Payment voided ${item.invoiceNumber || ""}`
+                              : `Vendor paid ${item.vendorName || ""}`}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {item.date ? new Date(item.date).toLocaleString() : "--"} {item.method ? `• ${item.method}` : ""}
+                    </p>
+                  </div>
+                  <p className="font-semibold text-foreground">Tk. {formatMoney(item.amount)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Aging and trend"
+        description="Outstanding receivables aging and monthly net trend."
+        className="mt-4"
+      >
+      <div className="space-y-4">
+        {receivablesAgingQuery.isLoading ? (
+          <ChartSkeleton />
+        ) : (
+          <AgingBars data={receivablesAgingBars} title="Receivables Aging" />
+        )}
+      </div>
       <div className="mt-4">
         {!canViewCharts ? (
           <EmptyState title="Trend restricted" description="Net trend requires sales + profit access." />
@@ -439,9 +725,15 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      </CollapsibleSection>
 
       {canShowAdminDashboard && (
-        <div className="glass mt-6 p-4 rounded-xl space-y-3">
+        <CollapsibleSection
+          title="Accounts notes"
+          description="Quick links and accounting context for this dashboard."
+          className="mt-6"
+        >
+        <div className="glass rounded-xl p-4 space-y-3">
           <div className="flex items-center justify-between">
             <div>
               <p className="font-semibold text-foreground">Accounts</p>
@@ -463,15 +755,22 @@ export default function Dashboard() {
               : ""}
           </p>
         </div>
+        </CollapsibleSection>
       )}
       {isOwner && (
-        <div className="glass mt-4 p-4 rounded-xl space-y-3 border border-red-900/60 bg-red-950/20">
+        <CollapsibleSection
+          title="Danger zone"
+          description="Owner-only destructive admin tools."
+          className="mt-4 border-red-900/40 bg-red-950/10"
+          defaultOpen={false}
+        >
+        <div className="glass rounded-xl p-4 space-y-3 border border-red-900/60 bg-red-950/20">
           <div className="flex items-center justify-between">
             <div>
               <p className="font-semibold text-foreground">Danger zone</p>
               <p className="text-sm text-muted-foreground">Delete all business data except users.</p>
             </div>
-            {purgeData.isSuccess && <span className="text-xs text-green-400">Purged</span>}
+            {purgeData.isSuccess && <span className="text-xs text-[var(--success-text)]">Purged</span>}
           </div>
           <p className="text-xs text-red-200">
             This removes customers, vehicles, parts, work orders, time logs, invoices, payments, expenses, audit logs, and inventory transactions.
@@ -492,11 +791,12 @@ export default function Dashboard() {
             {purgeData.isPending ? "Purging..." : "Delete all data (keep users)"}
           </Button>
           {purgeData.isError && (
-            <p className="text-xs text-red-300">
+            <p className="text-xs text-[var(--danger-text)]">
               {(purgeData.error as Error)?.message || "Purge failed. Only OWNER_ADMIN may run this."}
             </p>
           )}
         </div>
+        </CollapsibleSection>
       )}
     </>
   );

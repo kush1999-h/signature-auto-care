@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${barlow.className}`}>
+    <html lang="en" className={barlow.className} suppressHydrationWarning>
       <body className="bg-background text-foreground">
         <Providers>{children}</Providers>
       </body>

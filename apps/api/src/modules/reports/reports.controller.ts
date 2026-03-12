@@ -27,4 +27,30 @@ export class ReportsController {
   inventory() {
     return this.reports.inventoryReport();
   }
+
+  @Get("receivables-aging")
+  @PermissionsRequired(Permissions.REPORTS_READ_PROFIT)
+  receivablesAging(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.reports.receivablesAgingReport({ from, to });
+  }
+
+  @Get("payables-aging")
+  @PermissionsRequired(Permissions.REPORTS_READ_PROFIT)
+  payablesAging(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.reports.payablesAgingReport({ from, to });
+  }
+
+  @Get("finance-activity")
+  @PermissionsRequired(Permissions.REPORTS_READ_PROFIT)
+  financeActivity(
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("limit") limit?: number
+  ) {
+    return this.reports.financeActivityReport({
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
 }

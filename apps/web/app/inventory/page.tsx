@@ -17,6 +17,8 @@ import { Table, THead, TBody, TR, TH, TD } from "../../components/ui/table";
 import { Select } from "../../components/ui/select";
 import { Textarea } from "../../components/ui/textarea";
 import { useToast } from "../../components/ui/toast";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
 
 type Part = {
   _id: string;
@@ -31,6 +33,8 @@ type Part = {
   purchasePrice?: number;
   avgCost?: number;
   reorderLevel?: number;
+  isArchived?: boolean;
+  archivedAt?: string;
 };
 
 type Transaction = {
@@ -103,6 +107,7 @@ export default function InventoryPage() {
 
   const [search, setSearch] = useState("");
   const [barcode, setBarcode] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const [selectedPart, setSelectedPart] = useState<Part | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [receiveOpen, setReceiveOpen] = useState(false);
@@ -194,9 +199,11 @@ export default function InventoryPage() {
   }, [selectedPart]);
 
   const partsQuery = useQuery({
-    queryKey: ["parts", debouncedSearch],
+    queryKey: ["parts", debouncedSearch, showArchived],
     queryFn: async () => {
-      const res = await api.get("/parts", { params: { search: debouncedSearch, limit: 500 } });
+      const res = await api.get("/parts", {
+        params: { search: debouncedSearch, limit: 500, includeArchived: showArchived },
+      });
       return res.data;
     },
     enabled: Boolean(canRead)
@@ -256,6 +263,25 @@ export default function InventoryPage() {
     () => (partsQuery.data?.items as Part[] | undefined) || [],
     [partsQuery.data]
   );
+  const archiveMutation = useMutation({
+    mutationFn: async (payload: { id: string; archived: boolean }) =>
+      api.patch(`/parts/${payload.id}/${payload.archived ? "archive" : "unarchive"}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["parts"] });
+      toast.show({
+        title: "Part updated",
+        description: "Archive status saved.",
+        variant: "success",
+      });
+    },
+    onError: (err: unknown) => {
+      toast.show({
+        title: "Unable to update part",
+        description: getErrorMessage(err) || "Try again.",
+        variant: "error",
+      });
+    },
+  });
   const [sortKey, setSortKey] = useState<keyof Part>("partName");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(1);
@@ -595,83 +621,103 @@ export default function InventoryPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Inventory</h1>
-          <p className="text-muted-foreground text-sm">Receive Stock, Issue to Work Order, Adjust Stock, and Reverse Transaction with audit.</p>
+      <PageHeader
+        title="Inventory"
+        description="Monitor stock levels clearly, then use the existing stock actions without changing the workflow."
+        badge={viewOnlyMessage ? <Badge variant="warning">View-only</Badge> : <Badge variant="secondary">{parts.length} parts</Badge>}
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="rounded-xl border border-border bg-card/50 px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Low stock</p>
+          <p className="text-2xl font-semibold text-foreground">{lowStockCount}</p>
         </div>
-        {viewOnlyMessage && <Badge variant="warning">View-only</Badge>}
+        <div className="rounded-xl border border-border bg-card/50 px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Today counter sales</p>
+          <p className="text-2xl font-semibold text-foreground">{todaysCounterSales}</p>
+        </div>
+        <div className="rounded-xl border border-border bg-card/50 px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Issued today</p>
+          <p className="text-2xl font-semibold text-foreground">{todaysIssued}</p>
+        </div>
+        <div className="rounded-xl border border-border bg-card/50 px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Archived visible</p>
+          <p className="text-2xl font-semibold text-foreground">{showArchived ? parts.filter((p) => p.isArchived).length : 0}</p>
+        </div>
       </div>
 
+      <PageToolbar>
+        <PageToolbarSection>
+          <Input
+            ref={searchRef}
+            placeholder="Search name / SKU"
+            title="Search by part name or SKU"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search inventory"
+          />
+          <Input
+            placeholder="Barcode scan"
+            title="Scan or type barcode"
+            value={barcode}
+            onChange={(e) => setBarcode(e.target.value)}
+            onFocus={() => setBarcodeFocused(true)}
+            onBlur={() => setBarcodeFocused(false)}
+            aria-label="Barcode search"
+          />
+        </PageToolbarSection>
+        <PageToolbarSection align="end">
+          <Button variant="secondary" onClick={() => setShowArchived((v) => !v)}>
+            {showArchived ? "Hide Archived" : "Show Archived"}
+          </Button>
+          {canCreate && (
+            <Button variant="secondary" onClick={() => setCreateOpen(true)}>
+              Create Part
+            </Button>
+          )}
+          {canReceive && (
+            <Button variant="secondary" onClick={() => setReceiveOpen(true)}>
+              Receive Stock
+            </Button>
+          )}
+          {canAdjust && <Button variant="secondary" onClick={() => setAdjustOpen(true)}>Adjust Stock</Button>}
+          {canIssue && <Button variant="secondary" onClick={() => setIssueOpen(true)}>Issue to WO</Button>}
+          {canPriceUpdate && selectedPart && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setPriceForm({ partId: selectedPart._id, sellingPrice: selectedPart.sellingPrice || 0 });
+                setPriceOpen(true);
+              }}
+            >
+              Update Price
+            </Button>
+          )}
+        </PageToolbarSection>
+      </PageToolbar>
+
       <div className="glass p-4 rounded-xl space-y-3">
-        <div className="grid md:grid-cols-2 gap-3">
-          <div className="flex gap-2 items-center">
-            <Input
-              ref={searchRef}
-              placeholder="Search name / SKU"
-              title="Search by part name or SKU"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search inventory"
-            />
-            <Input
-              placeholder="Barcode scan"
-              title="Scan or type barcode"
-              value={barcode}
-              onChange={(e) => setBarcode(e.target.value)}
-              onFocus={() => setBarcodeFocused(true)}
-              onBlur={() => setBarcodeFocused(false)}
-              aria-label="Barcode search"
-            />
-            {barcodeFocused && <span className="text-[11px] text-accent">Scan mode: focused</span>}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>Main stock table prioritizes identity, quantity, then money.</span>
+            {barcodeFocused && <span className="text-accent">Scan mode focused</span>}
           </div>
-          <div className="flex flex-wrap gap-2 justify-end">
-            {canCreate && (
-              <Button variant="secondary" onClick={() => setCreateOpen(true)}>
-                Create Part
-              </Button>
-            )}
-            {canPriceUpdate && selectedPart && (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setPriceForm({ partId: selectedPart._id, sellingPrice: selectedPart.sellingPrice || 0 });
-                  setPriceOpen(true);
-                }}
-              >
-                Update Price
-              </Button>
-            )}
+          <div className="flex flex-wrap gap-2">
             {canReport && (
-              <Button variant="secondary" onClick={() => setLedgerOpen(true)}>
+              <Button variant="outline" onClick={() => setLedgerOpen(true)}>
                 View Ledger
               </Button>
             )}
             {canViewPurchases && (
-              <Button variant="secondary" onClick={() => setPurchasesOpen(true)}>
+              <Button variant="outline" onClick={() => setPurchasesOpen(true)}>
                 Purchases
               </Button>
             )}
             {canViewPayables && (
-              <Button variant="secondary" onClick={() => setPayablesOpen(true)}>
+              <Button variant="outline" onClick={() => setPayablesOpen(true)}>
                 Payables
               </Button>
             )}
-          </div>
-        </div>
-
-        <div className="grid md:grid-cols-3 gap-3">
-          <div className="p-3 rounded-lg border border-border bg-card">
-            <p className="text-xs text-muted-foreground">Low stock items</p>
-            <p className="text-2xl font-semibold">{lowStockCount}</p>
-          </div>
-          <div className="p-3 rounded-lg border border-border bg-card">
-            <p className="text-xs text-muted-foreground">Today&apos;s counter sales</p>
-            <p className="text-2xl font-semibold">{todaysCounterSales}</p>
-          </div>
-          <div className="p-3 rounded-lg border border-border bg-card">
-            <p className="text-xs text-muted-foreground">Parts issued today</p>
-            <p className="text-2xl font-semibold">{todaysIssued}</p>
           </div>
         </div>
 
@@ -680,14 +726,15 @@ export default function InventoryPage() {
             <THead>
               <TR>
                 {[
-                  { key: "sku", label: "SKU" },
                   { key: "partName", label: "Name" },
+                  { key: "sku", label: "SKU / Barcode" },
                   { key: "category", label: "Category" },
                   { key: "onHandQty", label: "On hand" },
                   { key: "reservedQty", label: "Reserved" },
                   { key: "availableQty", label: "Available" },
                   { key: "sellingPrice", label: "Sell" },
-                  { key: "purchasePrice", label: "Landed" }
+                  { key: "avgCost", label: "Avg cost" },
+                  { key: "isArchived", label: "State" }
                 ].map((col) => (
                   <TH
                     key={col.key}
@@ -703,33 +750,43 @@ export default function InventoryPage() {
                     {col.label} {sortKey === col.key ? (sortDir === "asc" ? "up" : "down") : ""}
                   </TH>
                 ))}
-                <TH></TH>
+                <TH>Action state</TH>
               </TR>
             </THead>
             <TBody>
               {loading &&
                 Array.from({ length: 6 }).map((_, i) => (
                   <TR key={i}>
-                    <TD colSpan={9}>
+                    <TD colSpan={10}>
                       <Skeleton className="h-6 w-full" />
                     </TD>
                   </TR>
                 ))}
               {!loading &&
                 pagedParts.map((p) => (
-                  <TR key={p._id} onClick={() => setSelectedPart(p)} className="cursor-pointer">
-                    <TD className="font-mono text-xs">{p.sku}</TD>
-                    <TD>{p.partName}</TD>
+                  <TR
+                    key={p._id}
+                    onClick={() => setSelectedPart(p)}
+                    className={`cursor-pointer ${selectedPart?._id === p._id ? "bg-primary/10" : ""}`}
+                  >
+                    <TD className="font-medium text-foreground">{p.partName}</TD>
+                    <TD className="font-mono text-xs">
+                      <div>{p.sku}</div>
+                      <div className="text-muted-foreground">{p.barcode || "--"}</div>
+                    </TD>
                     <TD>{p.category || "-"}</TD>
                     <TD>{p.onHandQty ?? 0}</TD>
                     <TD>{p.reservedQty ?? 0}</TD>
                     <TD className="font-semibold">{p.availableQty ?? (p.onHandQty ?? 0) - (p.reservedQty ?? 0)}</TD>
-                    <TD>Tk. {p.sellingPrice?.toFixed(2) ?? "--"}</TD>
-                    <TD className="text-xs text-muted-foreground">
-                      {p.purchasePrice !== undefined ? `Tk. ${p.purchasePrice.toFixed(2)}` : "--"}
+                    <TD className="text-right">Tk. {p.sellingPrice?.toFixed(2) ?? "--"}</TD>
+                    <TD className="text-right text-xs text-muted-foreground">
+                      {p.avgCost !== undefined ? `Tk. ${p.avgCost.toFixed(2)}` : "--"}
                     </TD>
                     <TD>
-                      {p.reorderLevel && (p.onHandQty ?? 0) < p.reorderLevel ? <Badge variant="warning">Low</Badge> : <Badge variant="secondary">OK</Badge>}
+                      {p.isArchived ? <Badge variant="secondary">Archived</Badge> : <Badge variant="success">Active</Badge>}
+                    </TD>
+                    <TD>
+                      {p.reorderLevel && (p.onHandQty ?? 0) < p.reorderLevel ? <Badge variant="warning">Low stock</Badge> : <Badge variant="secondary">Healthy</Badge>}
                     </TD>
                   </TR>
                 ))}
@@ -805,8 +862,23 @@ export default function InventoryPage() {
               <p>Sell price: Tk. {selectedPart.sellingPrice?.toFixed(2) ?? "--"}</p>
               <p>Avg cost: Tk. {selectedPart.avgCost?.toFixed(2) ?? "--"}</p>
               <p>Category: {selectedPart.category || "-"}</p>
+              <p>Status: {selectedPart.isArchived ? "Archived" : "Active"}</p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {canCreate && (
+                <Button
+                  variant="secondary"
+                  onClick={() =>
+                    archiveMutation.mutate({
+                      id: selectedPart._id,
+                      archived: !selectedPart.isArchived,
+                    })
+                  }
+                  disabled={archiveMutation.isPending}
+                >
+                  {selectedPart.isArchived ? "Unarchive" : "Archive"}
+                </Button>
+              )}
               {canReceive && (
                 <Button
                   onClick={() => {
@@ -867,17 +939,16 @@ export default function InventoryPage() {
           )}
           <div className="grid grid-cols-2 gap-2">
             <Input
-              type="number"
-              min={1}
+              type="text"
+              inputMode="numeric"
               placeholder="Quantity"
               title="Units to receive"
               value={receiveForm.qty}
               onChange={(e) => setReceiveForm((p) => ({ ...p, qty: Number(e.target.value) }))}
             />
             <Input
-              type="number"
-              min={0}
-              step="0.01"
+              type="text"
+              inputMode="decimal"
               placeholder="Unit cost"
               title="Cost per unit"
               value={receiveForm.unitCost}
@@ -895,9 +966,8 @@ export default function InventoryPage() {
             <option value="CREDIT">Credit</option>
           </Select>
           <Input
-            type="number"
-            min={0}
-            step="0.01"
+            type="text"
+            inputMode="decimal"
             placeholder="Sell price (optional)"
             title="Customer price per unit"
             value={receiveForm.sellingPrice ?? ""}
@@ -988,8 +1058,8 @@ export default function InventoryPage() {
             />
           </div>
           <Input
-            type="number"
-            min={0}
+            type="text"
+            inputMode="numeric"
             placeholder="Reorder level (units)"
             title="Alert threshold for low stock"
             value={createForm.reorderLevel}
@@ -1035,7 +1105,8 @@ export default function InventoryPage() {
             </p>
           )}
           <Input
-            type="number"
+            type="text"
+            inputMode="numeric"
             placeholder="Qty change (+/-)"
             title="Positive or negative units"
             value={adjustForm.qtyChange}
@@ -1101,8 +1172,8 @@ export default function InventoryPage() {
             onChange={(e) => setIssueForm((p) => ({ ...p, workOrderId: e.target.value }))}
           />
           <Input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
             placeholder="Quantity"
             title="Units to issue"
             value={issueForm.qty}
@@ -1149,9 +1220,8 @@ export default function InventoryPage() {
             ))}
           </Select>
           <Input
-            type="number"
-            min={0}
-            step="0.01"
+            type="text"
+            inputMode="decimal"
             placeholder="New sell price"
             title="Enter new sell price"
             value={priceForm.sellingPrice}
@@ -1217,7 +1287,7 @@ export default function InventoryPage() {
                   filteredLedger.map((t) => (
                     <TR key={t._id}>
                       <TD>{t.type}</TD>
-                      <TD className={t.qtyChange < 0 ? "text-primary" : "text-emerald-300"}>{t.qtyChange}</TD>
+                      <TD className={t.qtyChange < 0 ? "text-primary" : "text-[var(--success-text)]"}>{t.qtyChange}</TD>
                       <TD>Tk. {formatMoney(t.unitCost)}</TD>
                       <TD>Tk. {formatMoney(t.unitPrice)}</TD>
                       <TD>

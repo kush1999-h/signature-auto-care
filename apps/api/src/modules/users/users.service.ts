@@ -1,4 +1,4 @@
-import { Injectable, ConflictException, NotFoundException, ForbiddenException } from "@nestjs/common";
+import { Injectable, ConflictException, NotFoundException, ForbiddenException, InternalServerErrorException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
 import * as bcrypt from "bcrypt";
@@ -67,6 +67,9 @@ export class UsersService {
     const text = `Hi ${name || "there"}, your verification code is ${otp}. It expires in ${expiry} minutes.`;
 
     if (!host || !user || !pass || !from) {
+      if (process.env.NODE_ENV === "production") {
+        throw new InternalServerErrorException("SMTP is not configured");
+      }
       // eslint-disable-next-line no-console
       console.warn(`[MAIL_FALLBACK] OTP for ${to}: ${otp}`);
       return;

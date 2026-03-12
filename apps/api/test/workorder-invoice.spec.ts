@@ -29,7 +29,7 @@ import { AuditLog, AuditLogSchema } from "../src/schemas/audit-log.schema";
 
 jest.setTimeout(120000);
 
-describe("Work order close -> invoice generation", () => {
+describe("Work order invoice lifecycle", () => {
   let mongo: MongoMemoryReplSet;
   let connection: Connection;
   let service: WorkOrdersService;
@@ -79,7 +79,7 @@ describe("Work order close -> invoice generation", () => {
     }
   });
 
-  test("closing a work order bills labor, parts, and extra charges to an invoice under the customer", async () => {
+  test("closing a work order issues an invoice and keeps due open without auto payment", async () => {
     const customerId = new mongoose.Types.ObjectId();
     const vehicleId = new mongoose.Types.ObjectId();
     const userId = new mongoose.Types.ObjectId().toString();
@@ -124,6 +124,7 @@ describe("Work order close -> invoice generation", () => {
     const invoice = await connection
       .model(Invoice.name)
       .findOne({ workOrderId: wo._id });
+    const payment = await connection.model(Payment.name).findOne({ invoiceId: invoice?._id });
     expect(invoice).toBeTruthy();
     expect(invoice?.customerId?.toString()).toBe(customerId.toString());
     expect(invoice?.vehicleId?.toString()).toBe(vehicleId.toString());
@@ -131,9 +132,12 @@ describe("Work order close -> invoice generation", () => {
     const totals = invoice ? Number(invoice.total.toString()) : 0;
     expect(totals).toBeCloseTo(150 + 2 * 80 + 15);
     expect(invoice?.lineItems).toHaveLength(3); // labor + part + shop fee
+    expect(invoice?.status).toBe("ISSUED");
+    expect(Number(invoice?.outstandingAmount?.toString() || 0)).toBeCloseTo(totals);
+    expect(payment).toBeNull();
   });
 
-  test("closing a work order twice keeps one invoice and refreshes totals", async () => {
+  test("owner admin can edit closed billing and refresh invoice totals", async () => {
     const customerId = new mongoose.Types.ObjectId();
     const vehicleId = new mongoose.Types.ObjectId();
     const userId = new mongoose.Types.ObjectId().toString();
@@ -173,7 +177,7 @@ describe("Work order close -> invoice generation", () => {
       },
       {
         userId,
-        role: "OPS_MANAGER",
+        role: "OWNER_ADMIN",
         permissions: [Permissions.WORKORDERS_BILLING_EDIT],
       }
     );
@@ -191,9 +195,10 @@ describe("Work order close -> invoice generation", () => {
     expect(invoices).toHaveLength(1);
     const totals = Number(invoices[0].total.toString());
     expect(totals).toBeCloseTo(200 + 2 * 60 + 50);
+    expect(invoices[0].status).toBe("ISSUED");
   });
 
-  test("advance reduces billing payment due without reducing invoice revenue total", async () => {
+  test("advance reduces outstanding due without reducing invoice revenue total", async () => {
     const customerId = new mongoose.Types.ObjectId();
     const vehicleId = new mongoose.Types.ObjectId();
     const userId = new mongoose.Types.ObjectId().toString();
@@ -225,11 +230,56 @@ describe("Work order close -> invoice generation", () => {
 
     expect(invoice).toBeTruthy();
     expect(Number(invoice?.total?.toString() || 0)).toBeCloseTo(600);
-    expect(Number(payment?.amount?.toString() || 0)).toBeCloseTo(400);
+    expect(payment).toBeNull();
+    expect(invoice?.status).toBe("DRAFT");
+    expect(Number(invoice?.outstandingAmount?.toString() || 0)).toBeCloseTo(400);
     expect(Number(refreshed?.advanceAppliedAmount?.toString() || 0)).toBeCloseTo(200);
   });
 
-  test("historical backfill creates closed invoice with optional cost affecting cogs inputs", async () => {
+  test("billing can issue invoice, take partial payment, and close with remaining due", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    const vehicleId = new mongoose.Types.ObjectId();
+    const userId = new mongoose.Types.ObjectId().toString();
+
+    const wo = await connection.model(WorkOrder.name).create({
+      customerId,
+      vehicleId,
+      status: "In Progress",
+      billableLaborAmount: mongoose.Types.Decimal128.fromString("500"),
+      advanceAmount: mongoose.Types.Decimal128.fromString("100"),
+    });
+
+    await service.updateBilling(
+      wo._id.toString(),
+      {
+        billableLaborAmount: 500,
+        otherCharges: [{ name: "Extra", amount: 100 }],
+        issueInvoice: true,
+        paymentAmount: 200,
+        paymentMethod: "CASH",
+        closeWorkOrder: true,
+      },
+      {
+        userId,
+        role: "SERVICE_ADVISOR",
+        permissions: [Permissions.WORKORDERS_BILLING_EDIT],
+      }
+    );
+
+    const invoice = await connection.model(Invoice.name).findOne({ workOrderId: wo._id });
+    const payments = await connection.model(Payment.name).find({ invoiceId: invoice?._id });
+    const refreshed = await connection.model(WorkOrder.name).findById(wo._id);
+
+    expect(refreshed?.status).toBe("Closed");
+    expect(refreshed?.deliveredAt).toBeTruthy();
+    expect(invoice?.status).toBe("PARTIALLY_PAID");
+    expect(Number(invoice?.total?.toString() || 0)).toBeCloseTo(600);
+    expect(Number(invoice?.totalPaid?.toString() || 0)).toBeCloseTo(200);
+    expect(Number(invoice?.outstandingAmount?.toString() || 0)).toBeCloseTo(300);
+    expect(payments).toHaveLength(1);
+  });
+
+  test("historical backfill can create paid closed invoice with optional cost affecting cogs inputs", async () => {
     const customerId = new mongoose.Types.ObjectId();
     const vehicleId = new mongoose.Types.ObjectId();
     const userId = new mongoose.Types.ObjectId().toString();
@@ -246,8 +296,10 @@ describe("Work order close -> invoice generation", () => {
         dateIn,
         dateOut,
         status: "Closed",
+        workOrderNumber: "LEGACY-001",
         historicalBillAmount: 5000,
         historicalCostAmount: 3200,
+        historicalPaidAmount: 5000,
       } as any,
       {
         userId,
@@ -265,14 +317,52 @@ describe("Work order close -> invoice generation", () => {
     const refreshed = await connection.model(WorkOrder.name).findById(wo._id);
 
     expect(refreshed?.status).toBe("Closed");
+    expect(refreshed?.workOrderNumber).toBe("LEGACY-001");
     expect(refreshed?.isHistorical).toBe(true);
     expect(refreshed?.deliveredAt?.toISOString()).toBe(dateOut);
     expect(invoice).toBeTruthy();
     expect(Number(invoice?.total?.toString() || 0)).toBeCloseTo(5000);
     expect(Number(payment?.amount?.toString() || 0)).toBeCloseTo(5000);
+    expect(invoice?.status).toBe("PAID");
     const otherLine = (invoice?.lineItems || []).find((li: any) => li.type === "OTHER");
     expect(otherLine).toBeTruthy();
     expect(Number(otherLine?.costAtTime?.toString() || 0)).toBeCloseTo(3200);
+  });
+
+  test("duplicate work order number is rejected", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    const vehicleId = new mongoose.Types.ObjectId();
+    const userId = new mongoose.Types.ObjectId().toString();
+
+    await service.create(
+      {
+        customerId,
+        vehicleId,
+        complaint: "First",
+        workOrderNumber: "WO-MANUAL-1",
+      } as any,
+      {
+        userId,
+        role: "SERVICE_ADVISOR",
+        permissions: [Permissions.WORKORDERS_CREATE],
+      } as any
+    );
+
+    await expect(
+      service.create(
+        {
+          customerId,
+          vehicleId,
+          complaint: "Second",
+          workOrderNumber: "WO-MANUAL-1",
+        } as any,
+        {
+          userId,
+          role: "SERVICE_ADVISOR",
+          permissions: [Permissions.WORKORDERS_CREATE],
+        } as any
+      )
+    ).rejects.toThrow("Work order number already exists");
   });
 
   test("reopening a closed work order clears deliveredAt", async () => {

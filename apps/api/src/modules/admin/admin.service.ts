@@ -9,6 +9,7 @@ import {
   Invoice,
   InventoryTransaction,
   Payment,
+  VendorPayment,
   Part,
   Service,
   TimeLog,
@@ -28,6 +29,7 @@ export class AdminService {
     private trxModel: Model<InventoryTransaction>,
     @InjectModel(Invoice.name) private invoiceModel: Model<Invoice>,
     @InjectModel(Payment.name) private paymentModel: Model<Payment>,
+    @InjectModel(VendorPayment.name) private vendorPaymentModel: Model<VendorPayment>,
     @InjectModel(Expense.name) private expenseModel: Model<Expense>,
     @InjectModel(Payable.name) private payableModel: Model<Payable>,
     @InjectModel(Part.name) private partModel: Model<Part>,
@@ -40,7 +42,7 @@ export class AdminService {
       throw new ForbiddenException("Only OWNER_ADMIN can purge data");
     }
 
-    const [customers, vehicles, workOrders, timeLogs, trx, invoices, payments, expenses, payables, parts, services, audits] =
+    const [customers, vehicles, workOrders, timeLogs, trx, invoices, payments, vendorPayments, expenses, payables, parts, services, audits] =
       await Promise.all([
         this.customerModel.deleteMany({}),
         this.vehicleModel.deleteMany({}),
@@ -49,6 +51,7 @@ export class AdminService {
         this.trxModel.deleteMany({}),
         this.invoiceModel.deleteMany({}),
         this.paymentModel.deleteMany({}),
+        this.vendorPaymentModel.deleteMany({}),
         this.expenseModel.deleteMany({}),
         this.payableModel.deleteMany({}),
         this.partModel.deleteMany({}),
@@ -66,6 +69,7 @@ export class AdminService {
         inventoryTransactions: trx.deletedCount || 0,
         invoices: invoices.deletedCount || 0,
         payments: payments.deletedCount || 0,
+        vendorPayments: vendorPayments.deletedCount || 0,
         expenses: expenses.deletedCount || 0,
         payables: payables.deletedCount || 0,
         parts: parts.deletedCount || 0,

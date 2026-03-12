@@ -27,9 +27,10 @@ export function NumberInput({ value, onChange, className, min = 0, allowEmpty = 
 
   return (
     <input
-      type="number"
+      type="text"
       inputMode="decimal"
-      step={step}
+      pattern="[0-9]*[.]?[0-9]*"
+      data-step={step}
       value={value}
       onChange={handleChange}
       className={clsx(

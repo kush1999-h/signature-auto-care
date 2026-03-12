@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { InjectConnection, InjectModel } from "@nestjs/mongoose";
-import { Connection, Model, Types } from "mongoose";
+import { ClientSession, Connection, Model, Types } from "mongoose";
 import {
   WorkOrderStatus,
   Permissions,
@@ -14,6 +14,7 @@ import {
   InvoiceType,
   InvoiceStatus,
   WorkOrderStatusType,
+  PaymentType,
   Role,
   Roles,
 } from "@signature-auto-care/shared";
@@ -55,8 +56,11 @@ type CreateWorkOrderInput = Partial<WorkOrder> & {
   isHistorical?: boolean;
   dateIn?: string | Date;
   dateOut?: string | Date;
+  workOrderNumber?: string;
   historicalBillAmount?: number;
   historicalCostAmount?: number;
+  historicalPaidAmount?: number;
+  historicalInvoiceStatus?: string;
   historicalSource?: string;
   paymentMethod?: string;
 };
@@ -100,6 +104,16 @@ export class WorkOrdersService {
   private decimalToNumber(val?: Types.Decimal128 | number | null) {
     if (!val) return 0;
     if (typeof val === "number") return val;
+    if (
+      typeof val === "object" &&
+      val !== null &&
+      "$numberDecimal" in (val as unknown as Record<string, unknown>)
+    ) {
+      const parsed = Number(
+        (val as unknown as { $numberDecimal?: string }).$numberDecimal || 0
+      );
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
     return parseFloat(val.toString());
   }
 
@@ -148,7 +162,7 @@ export class WorkOrdersService {
   }
 
   private buildInvoicePayload(wo: WorkOrder) {
-    const { labor, partsTotal, otherTotal, subtotal, tax, total } =
+    const { labor, partsTotal, servicesTotal, otherTotal, subtotal, tax, total } =
       this.computeFinancials(wo);
     const lineItems: InvoiceLineItem[] = [];
 
@@ -214,6 +228,7 @@ export class WorkOrdersService {
       lineItems,
       labor,
       partsTotal,
+      servicesTotal,
       otherTotal,
       subtotal,
       tax,
@@ -221,47 +236,300 @@ export class WorkOrdersService {
     };
   }
 
+  private isOwnerAdmin(user?: AuthUser) {
+    return String(user?.role || "") === Roles.OWNER_ADMIN;
+  }
+
+  private isFinalizedInvoiceStatus(status?: string) {
+    return (
+      status === InvoiceStatus.PARTIALLY_PAID ||
+      status === InvoiceStatus.PAID ||
+      status === InvoiceStatus.VOID
+    );
+  }
+
+  private normalizeWorkOrderNumber(value?: string) {
+    return (value || "").trim();
+  }
+
+  private async generateWorkOrderNumber(candidate?: string, excludeId?: string) {
+    const requested = this.normalizeWorkOrderNumber(candidate);
+    if (requested) {
+      const existing = await this.workOrderModel.findOne({
+        workOrderNumber: requested,
+        ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+      });
+      if (existing) {
+        throw new BadRequestException("Work order number already exists");
+      }
+      return requested;
+    }
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const generated = `WO-${Date.now().toString().slice(-8)}-${Math.floor(
+        100 + Math.random() * 900
+      )}`;
+      const exists = await this.workOrderModel.findOne({
+        workOrderNumber: generated,
+      });
+      if (!exists) {
+        return generated;
+      }
+    }
+
+    throw new BadRequestException("Unable to generate unique work order number");
+  }
+
+  private async sumInvoicePayments(invoiceId: Types.ObjectId, session?: ClientSession) {
+    const payments = await this.paymentModel
+      .find({ invoiceId })
+      .session(session || null)
+      .sort({ paidAt: -1, createdAt: -1 })
+      .exec();
+    const totalPaid = payments.reduce((sum, payment: any) => {
+      if (payment.isVoided) return sum;
+      const amount = this.decimalToNumber(payment.amount);
+      return payment.paymentType === PaymentType.REFUND ? sum - amount : sum + amount;
+    }, 0);
+    return { payments, totalPaid };
+  }
+
+  private async syncInvoiceBalances(
+    invoice: any,
+    wo: WorkOrder,
+    session?: ClientSession,
+    opts?: { forceStatus?: string }
+  ) {
+    const { totalPaid } = await this.sumInvoicePayments(
+      invoice._id as Types.ObjectId,
+      session
+    );
+    const financials = this.computeFinancials(wo);
+    const effectivePaid = financials.advanceApplied + totalPaid;
+    const outstandingAmount = Math.max(financials.total - effectivePaid, 0);
+
+    invoice.totalPaid = this.decimalFromNumber(totalPaid);
+    invoice.outstandingAmount = this.decimalFromNumber(outstandingAmount);
+
+    if (opts?.forceStatus) {
+      invoice.status = opts.forceStatus;
+      if (opts.forceStatus === InvoiceStatus.ISSUED && !invoice.issuedAt) {
+        invoice.issuedAt = new Date();
+      }
+    } else if (invoice.status !== InvoiceStatus.VOID) {
+      if (outstandingAmount <= 0 && financials.total > 0) {
+        invoice.status = InvoiceStatus.PAID;
+      } else if (invoice.status !== InvoiceStatus.DRAFT) {
+        invoice.status = totalPaid > 0 || financials.advanceApplied > 0
+          ? InvoiceStatus.PARTIALLY_PAID
+          : InvoiceStatus.ISSUED;
+      }
+      if (
+        (invoice.status === InvoiceStatus.ISSUED ||
+          invoice.status === InvoiceStatus.PARTIALLY_PAID ||
+          invoice.status === InvoiceStatus.PAID) &&
+        !invoice.issuedAt
+      ) {
+        invoice.issuedAt = new Date();
+      }
+      if (!invoice.dueDate && (invoice.issuedAt || invoice.createdAt)) {
+        invoice.dueDate = invoice.issuedAt || invoice.createdAt;
+      }
+    }
+
+    await (invoice as unknown as { save: (args?: { session?: ClientSession }) => Promise<unknown> }).save(
+      session ? { session } : undefined
+    );
+
+    return {
+      totalPaid,
+      outstandingAmount,
+      overpayment: Math.max(effectivePaid - financials.total, 0),
+      advanceApplied: financials.advanceApplied,
+    };
+  }
+
+  private async upsertInvoiceForWorkOrder(
+    wo: any,
+    session?: ClientSession,
+    opts?: { issue?: boolean }
+  ) {
+    const invoiceData = this.buildInvoicePayload(wo);
+    if (invoiceData.lineItems.length === 0) {
+      throw new BadRequestException("Cannot create invoice without billable items");
+    }
+
+    let invoice = await this.invoiceModel
+      .findOne({ workOrderId: wo._id })
+      .session(session || null);
+
+    if (invoice) {
+      invoice.lineItems = invoiceData.lineItems;
+      invoice.subtotal = this.decimalFromNumber(invoiceData.subtotal);
+      invoice.tax = this.decimalFromNumber(invoiceData.tax);
+      invoice.total = this.decimalFromNumber(invoiceData.total);
+      invoice.customerId = wo.customerId;
+      invoice.vehicleId = wo.vehicleId;
+      if (opts?.issue && invoice.status === InvoiceStatus.DRAFT) {
+        invoice.status = InvoiceStatus.ISSUED;
+        invoice.issuedAt = invoice.issuedAt || new Date();
+      }
+      await (invoice as unknown as { save: (args?: { session?: ClientSession }) => Promise<unknown> }).save(
+        session ? { session } : undefined
+      );
+    } else {
+      invoice = await this.invoiceModel.create(
+        [
+          {
+            invoiceNumber: `INV-${Date.now()}`,
+            type: InvoiceType.WORK_ORDER,
+            customerId: wo.customerId,
+            vehicleId: wo.vehicleId,
+            workOrderId: wo._id,
+            lineItems: invoiceData.lineItems,
+            subtotal: this.decimalFromNumber(invoiceData.subtotal),
+            tax: this.decimalFromNumber(invoiceData.tax),
+            total: this.decimalFromNumber(invoiceData.total),
+            status: opts?.issue ? InvoiceStatus.ISSUED : InvoiceStatus.DRAFT,
+            issuedAt: opts?.issue ? new Date() : undefined,
+          },
+        ],
+        session ? { session } : undefined
+      ).then((docs) => docs[0]);
+    }
+
+    const settlement = await this.syncInvoiceBalances(
+      invoice,
+      wo,
+      session,
+      opts?.issue && invoice && invoice.status === InvoiceStatus.DRAFT
+        ? { forceStatus: InvoiceStatus.ISSUED }
+        : undefined
+    );
+
+    return { invoice, invoiceData, settlement };
+  }
+
+  private async createPaymentForInvoice(
+    invoice: any,
+    wo: WorkOrder,
+    payment: { amount: number; method: string; note?: string; paymentType?: string },
+    session?: ClientSession
+  ) {
+    const amount = Number(payment.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException("Payment amount must be greater than zero");
+    }
+
+    const paymentRecord = await this.paymentModel.create(
+      [
+        {
+          invoiceId: invoice._id,
+          paymentType: payment.paymentType || PaymentType.INVOICE_PAYMENT,
+          method: payment.method,
+          amount: this.decimalFromNumber(amount),
+          paidAt: new Date(),
+          note: payment.note,
+        },
+      ],
+      session ? { session } : undefined
+    ).then((docs) => docs[0]);
+
+    const settlement = await this.syncInvoiceBalances(
+      invoice,
+      wo,
+      session
+    );
+
+    return { payment: paymentRecord, settlement };
+  }
+
   async list(user: AuthUser, query: { status?: string } = {}) {
     const userId = resolveUserId(user);
     const userObjectId = toObjectId(userId);
+    const baseFilter: Record<string, unknown> = {};
+    if (query.status) baseFilter.status = query.status;
+    let items: any[] = [];
 
     // Check for READ_ALL permission first
     if (user.permissions?.includes(Permissions.WORKORDERS_READ_ALL)) {
-      const filter: Record<string, unknown> = {};
-      if (query.status) filter.status = query.status;
-      return this.workOrderModel.find(filter).sort({ createdAt: -1 }).exec();
+      items = await this.workOrderModel.find(baseFilter).sort({ createdAt: -1 }).lean().exec();
     }
-
-    // Check for READ_ASSIGNED permission
-    if (user.permissions?.includes(Permissions.WORKORDERS_READ_ASSIGNED)) {
+    else if (user.permissions?.includes(Permissions.WORKORDERS_READ_ASSIGNED)) {
       if (!userObjectId) {
         throw new ForbiddenException("Invalid user id");
       }
 
       // If no status filter, default to excluding closed/canceled
       if (!query.status) {
-        const assigned = this.workOrderModel
+        items = await this.workOrderModel
           .find({
             "assignedEmployees.employeeId": userObjectId,
             status: { $nin: [WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELED] },
           })
-          .sort({ createdAt: -1 });
-
-        return assigned.exec();
+          .sort({ createdAt: -1 })
+          .lean()
+          .exec();
       }
-
-      // With explicit status filter, respect it
-      const assigned = this.workOrderModel
+      else {
+        items = await this.workOrderModel
         .find({
           "assignedEmployees.employeeId": userObjectId,
           status: query.status,
         })
-        .sort({ createdAt: -1 });
-
-      return assigned.exec();
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec();
+      }
+    } else {
+      throw new ForbiddenException("No access to work orders");
     }
 
-    throw new ForbiddenException("No access to work orders");
+    const customerIds = Array.from(
+      new Set(items.map((item) => item.customerId?.toString()).filter(Boolean))
+    );
+    const vehicleIds = Array.from(
+      new Set(items.map((item) => item.vehicleId?.toString()).filter(Boolean))
+    );
+    const workOrderIds = items.map((item) => item._id);
+
+    const [customers, vehicles, invoices] = await Promise.all([
+      customerIds.length
+        ? this.customerModel.find({ _id: { $in: customerIds } }).select("name phone").lean().exec()
+        : Promise.resolve([]),
+      vehicleIds.length
+        ? this.vehicleModel.find({ _id: { $in: vehicleIds } }).select("make model plate").lean().exec()
+        : Promise.resolve([]),
+      workOrderIds.length
+        ? this.invoiceModel
+            .find({ workOrderId: { $in: workOrderIds } })
+            .select("workOrderId invoiceNumber status total totalPaid outstandingAmount")
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+    ]);
+
+    const customerMap = new Map(customers.map((customer: any) => [customer._id.toString(), customer]));
+    const vehicleMap = new Map(vehicles.map((vehicle: any) => [vehicle._id.toString(), vehicle]));
+    const invoiceMap = new Map(
+      invoices.map((invoice: any) => [
+        invoice.workOrderId.toString(),
+        {
+          invoiceNumber: invoice.invoiceNumber,
+          status: invoice.status,
+          total: this.decimalToNumber(invoice.total),
+          totalPaid: this.decimalToNumber(invoice.totalPaid),
+          outstandingAmount: this.decimalToNumber(invoice.outstandingAmount),
+        },
+      ])
+    );
+
+    return items.map((item) => ({
+      ...item,
+      customer: item.customerId ? customerMap.get(item.customerId.toString()) : undefined,
+      vehicle: item.vehicleId ? vehicleMap.get(item.vehicleId.toString()) : undefined,
+      invoice: invoiceMap.get(item._id.toString()),
+    }));
   }
 
   async findById(id: string) {
@@ -294,6 +562,31 @@ export class WorkOrdersService {
       this.customerModel.findById(wo.customerId).lean(),
       this.vehicleModel.findById(wo.vehicleId).lean(),
     ]);
+    const relatedVisits = await this.workOrderModel
+      .find({
+        $or: [{ customerId: wo.customerId }, { vehicleId: wo.vehicleId }],
+      })
+      .select("customerId vehicleId deliveredAt dateIn createdAt")
+      .lean();
+    const visitAnchor = (entry: {
+      deliveredAt?: Date | string | null;
+      dateIn?: Date | string | null;
+      createdAt?: Date | string | null;
+    }) => entry.deliveredAt || entry.dateIn || entry.createdAt || null;
+    const vehicleVisits = relatedVisits.filter(
+      (entry) => normalizeId(entry.vehicleId) === normalizeId(wo.vehicleId)
+    );
+    const customerVisits = relatedVisits.filter(
+      (entry) => normalizeId(entry.customerId) === normalizeId(wo.customerId)
+    );
+    const vehicleDates = vehicleVisits
+      .map((entry) => visitAnchor(entry))
+      .filter(Boolean)
+      .map((entry) => new Date(entry as Date | string))
+      .sort((a, b) => a.getTime() - b.getTime());
+    const customerVehicleIds = new Set(
+      customerVisits.map((entry) => normalizeId(entry.vehicleId)).filter(Boolean)
+    );
 
     const users = assignedIds.length
       ? await this.userModel
@@ -358,8 +651,10 @@ export class WorkOrdersService {
 
     const invoice = await this.invoiceModel
       .findOne({ workOrderId: wo._id })
-      .select("_id invoiceNumber status total")
       .lean();
+    const payments = invoice
+      ? await this.paymentModel.find({ invoiceId: invoice._id }).sort({ paidAt: -1, createdAt: -1 }).lean()
+      : [];
 
     const auditEntries = await this.audit.list({
       entityType: "WorkOrder",
@@ -481,8 +776,9 @@ export class WorkOrdersService {
       timeLogs,
       totalMinutes,
     runningMinutes,
-    activeLog,
+      activeLog,
       invoice,
+      payments,
       isAssigned,
       audit: {
         createdBy: toAuditActor(createdEntry),
@@ -490,7 +786,28 @@ export class WorkOrdersService {
         billingUpdatedBy: toAuditActor(billingUpdateEntry)
       },
       auditTrail,
-      financials: this.computeFinancials(wo as WorkOrder),
+      visitSummary: {
+        vehicleVisitCount: vehicleVisits.length,
+        vehicleFirstVisit: vehicleDates[0]?.toISOString(),
+        vehicleLastVisit: vehicleDates[vehicleDates.length - 1]?.toISOString(),
+        customerVisitCount: customerVisits.length,
+        customerDistinctVehicles: customerVehicleIds.size,
+      },
+      financials: {
+        ...this.computeFinancials(wo as WorkOrder),
+        totalPaid: invoice ? this.decimalToNumber((invoice as { totalPaid?: Types.Decimal128 }).totalPaid || 0) : 0,
+        outstandingAmount: invoice
+          ? this.decimalToNumber((invoice as { outstandingAmount?: Types.Decimal128 }).outstandingAmount || 0)
+          : this.computeFinancials(wo as WorkOrder).amountDue,
+        overpayment: invoice
+          ? Math.max(
+              this.computeFinancials(wo as WorkOrder).advanceApplied +
+                payments.reduce((sum, payment) => sum + this.decimalToNumber((payment as { amount?: Types.Decimal128 }).amount || 0), 0) -
+                this.computeFinancials(wo as WorkOrder).total,
+              0
+            )
+          : 0,
+      },
     };
   }
 
@@ -538,6 +855,8 @@ export class WorkOrdersService {
 
     const historicalBillAmountRaw = payload.historicalBillAmount;
     const historicalCostAmountRaw = payload.historicalCostAmount;
+    const historicalPaidAmountRaw = payload.historicalPaidAmount;
+    const historicalInvoiceStatusRaw = payload.historicalInvoiceStatus;
     const historicalBillAmount =
       historicalBillAmountRaw === undefined || historicalBillAmountRaw === null
         ? null
@@ -546,6 +865,10 @@ export class WorkOrdersService {
       historicalCostAmountRaw === undefined || historicalCostAmountRaw === null
         ? null
         : Number(historicalCostAmountRaw);
+    const historicalPaidAmount =
+      historicalPaidAmountRaw === undefined || historicalPaidAmountRaw === null
+        ? null
+        : Number(historicalPaidAmountRaw);
     if (historicalBillAmount !== null && (!Number.isFinite(historicalBillAmount) || historicalBillAmount < 0)) {
       throw new BadRequestException("Historical bill amount must be a non-negative number");
     }
@@ -554,6 +877,30 @@ export class WorkOrdersService {
     }
     if ((historicalCostAmount || 0) > 0 && (historicalBillAmount || 0) <= 0) {
       throw new BadRequestException("Historical bill amount is required when cost is provided");
+    }
+    if (historicalPaidAmount !== null && (!Number.isFinite(historicalPaidAmount) || historicalPaidAmount < 0)) {
+      throw new BadRequestException("Historical paid amount must be a non-negative number");
+    }
+    if (historicalPaidAmount !== null && historicalBillAmount !== null && historicalPaidAmount > historicalBillAmount) {
+      throw new BadRequestException("Historical paid amount cannot exceed bill amount");
+    }
+
+    const historicalInvoiceStatus = typeof historicalInvoiceStatusRaw === "string"
+      ? historicalInvoiceStatusRaw.trim().toUpperCase()
+      : "";
+    if (
+      historicalInvoiceStatus &&
+      !(
+        [
+          InvoiceStatus.DRAFT,
+          InvoiceStatus.ISSUED,
+          InvoiceStatus.PARTIALLY_PAID,
+          InvoiceStatus.PAID,
+          InvoiceStatus.VOID,
+        ] as string[]
+      ).includes(historicalInvoiceStatus)
+    ) {
+      throw new BadRequestException("Invalid historical invoice status");
     }
 
     const historicalSource =
@@ -575,6 +922,7 @@ export class WorkOrdersService {
 
     const createPayload: Partial<WorkOrder> = {
       ...payload,
+      workOrderNumber: await this.generateWorkOrderNumber(payload.workOrderNumber),
       status: requestedStatus,
       reference: reference || undefined,
       advanceAmount: this.decimalFromNumber(advanceAmount),
@@ -600,12 +948,46 @@ export class WorkOrdersService {
       if (refreshed) wo = refreshed;
     }
 
-    if (requestedStatus === WorkOrderStatus.CLOSED && user) {
+    if (
+      user &&
+      (requestedStatus === WorkOrderStatus.CLOSED ||
+        historicalBillAmount !== null ||
+        historicalPaidAmount !== null)
+    ) {
+      const shouldIssue =
+        historicalInvoiceStatus === InvoiceStatus.ISSUED ||
+        historicalInvoiceStatus === InvoiceStatus.PARTIALLY_PAID ||
+        historicalInvoiceStatus === InvoiceStatus.PAID ||
+        requestedStatus === WorkOrderStatus.CLOSED;
+
       await this.updateBilling(
         wo._id.toString(),
-        { paymentMethod: payload.paymentMethod || "CASH" },
+        {
+          paymentMethod: payload.paymentMethod || "CASH",
+          issueInvoice: shouldIssue,
+          closeWorkOrder: requestedStatus === WorkOrderStatus.CLOSED,
+          paymentAmount:
+            historicalPaidAmount ??
+            (requestedStatus === WorkOrderStatus.CLOSED &&
+            historicalBillAmount !== null &&
+            !historicalInvoiceStatus
+              ? historicalBillAmount
+              : undefined),
+        },
         user
       );
+
+      if (historicalInvoiceStatus) {
+        const invoice = await this.invoiceModel.findOne({ workOrderId: wo._id });
+        if (invoice) {
+          invoice.status = historicalInvoiceStatus;
+          if (historicalInvoiceStatus === InvoiceStatus.VOID) {
+            invoice.voidedAt = dateOut || new Date();
+          }
+          await invoice.save();
+        }
+      }
+
       if (dateOut) {
         await this.workOrderModel.updateOne(
           { _id: wo._id },
@@ -734,70 +1116,15 @@ export class WorkOrdersService {
       }
     }
 
-    // If status is being changed to Closed, close the invoice and record payment
+    // Closing a work order requires the invoice to be fully settled.
     if (status === WorkOrderStatus.CLOSED) {
-      const invoiceData = this.buildInvoicePayload(wo);
-      if (invoiceData.lineItems.length === 0) {
+      const { lineItems } = this.buildInvoicePayload(wo);
+      if (lineItems.length === 0) {
         throw new BadRequestException("Cannot close work order without billable items");
       }
-      if (invoiceData.lineItems.length > 0) {
-        const existingInvoice = await this.invoiceModel.findOne({
-          workOrderId: wo._id,
-        });
-        if (existingInvoice) {
-          // Always update invoice details and close it
-          existingInvoice.lineItems = invoiceData.lineItems;
-          existingInvoice.subtotal = this.decimalFromNumber(
-            invoiceData.subtotal
-          );
-          existingInvoice.tax = this.decimalFromNumber(invoiceData.tax);
-          existingInvoice.total = this.decimalFromNumber(invoiceData.total);
-          existingInvoice.customerId = wo.customerId;
-          existingInvoice.vehicleId = wo.vehicleId;
-          existingInvoice.status = InvoiceStatus.CLOSED;
-          await existingInvoice.save();
-          // Update or create payment for the closed invoice
-          const existingPayment = await this.paymentModel.findOne({
-            invoiceId: existingInvoice._id,
-          });
-          const paymentAmount = this.decimalFromNumber(
-            this.decimalToNumber(existingInvoice.total)
-          );
-          if (existingPayment) {
-            // Update existing payment with new amount
-            existingPayment.amount = paymentAmount;
-            await existingPayment.save();
-          } else {
-            // Create new payment
-            await this.paymentModel.create({
-              invoiceId: existingInvoice._id,
-              method: "CASH",
-              amount: paymentAmount,
-              paidAt: new Date(),
-            });
-          }
-        } else {
-          const invoiceNumber = `INV-${Date.now()}`;
-          const invoice = await this.invoiceModel.create({
-            invoiceNumber,
-            type: InvoiceType.WORK_ORDER,
-            customerId: wo.customerId,
-            vehicleId: wo.vehicleId,
-            workOrderId: wo._id,
-            lineItems: invoiceData.lineItems,
-            subtotal: this.decimalFromNumber(invoiceData.subtotal),
-            tax: this.decimalFromNumber(invoiceData.tax),
-            total: this.decimalFromNumber(invoiceData.total),
-            status: InvoiceStatus.CLOSED,
-          });
-          // Record payment for the new closed invoice
-          await this.paymentModel.create({
-            invoiceId: invoice._id,
-            method: "CASH",
-            amount: this.decimalFromNumber(invoiceData.total),
-            paidAt: new Date(),
-          });
-        }
+      const { settlement } = await this.upsertInvoiceForWorkOrder(wo, undefined, { issue: true });
+      if (Number(settlement.outstandingAmount || 0) > 0) {
+        throw new BadRequestException("Full payment is required before closing this work order");
       }
     }
 
@@ -829,6 +1156,9 @@ export class WorkOrdersService {
       otherCharges?: { name: string; amount: number; costAtTime?: number }[];
       servicesUsed?: BillingServiceLineInput[];
       paymentMethod?: string;
+      paymentAmount?: number;
+      issueInvoice?: boolean;
+      closeWorkOrder?: boolean;
     },
     user: AuthUser
   ) {
@@ -837,6 +1167,14 @@ export class WorkOrdersService {
     const canEditBilling = user.permissions?.includes(Permissions.WORKORDERS_BILLING_EDIT);
     if (!canEditBilling) {
       throw new ForbiddenException("No permission to edit billing");
+    }
+
+    const existingInvoice = await this.invoiceModel.findOne({ workOrderId: wo._id });
+    const invoiceLocked =
+      wo.status === WorkOrderStatus.CLOSED ||
+      this.isFinalizedInvoiceStatus(existingInvoice?.status);
+    if (invoiceLocked && !this.isOwnerAdmin(user)) {
+      throw new ForbiddenException("Only owner admin can edit finalized billing");
     }
 
     if (payload.billableLaborAmount !== undefined) {
@@ -954,76 +1292,73 @@ export class WorkOrdersService {
       });
     }
 
-    // Billing submission closes/updates invoice and marks work order closed.
+    let invoice: any = null;
+    let settlement = {
+      totalPaid: 0,
+      outstandingAmount: financials.amountDue,
+      overpayment: 0,
+      advanceApplied: financials.advanceApplied,
+    };
+    let paymentRecord: any = null;
     if (wo.status !== WorkOrderStatus.CANCELED) {
-      const invoiceData = this.buildInvoicePayload(wo);
-      if (invoiceData.lineItems.length > 0) {
-        // Upsert invoice
-        let invoice = await this.invoiceModel.findOne({ workOrderId: wo._id });
-        if (invoice) {
-          invoice.lineItems = invoiceData.lineItems;
-          invoice.subtotal = this.decimalFromNumber(invoiceData.subtotal);
-          invoice.tax = this.decimalFromNumber(invoiceData.tax);
-          invoice.total = this.decimalFromNumber(invoiceData.total);
-          invoice.customerId = wo.customerId;
-          invoice.vehicleId = wo.vehicleId;
-          invoice.status = InvoiceStatus.CLOSED;
-          await invoice.save();
-        } else {
-          invoice = await this.invoiceModel.create({
-            invoiceNumber: `INV-${Date.now()}`,
-            type: InvoiceType.WORK_ORDER,
-            customerId: wo.customerId,
-            vehicleId: wo.vehicleId,
-            workOrderId: wo._id,
-            lineItems: invoiceData.lineItems,
-            subtotal: this.decimalFromNumber(invoiceData.subtotal),
-            tax: this.decimalFromNumber(invoiceData.tax),
-            total: this.decimalFromNumber(invoiceData.total),
-            status: InvoiceStatus.CLOSED,
-          });
-        }
+      const upserted = await this.upsertInvoiceForWorkOrder(wo, undefined, {
+        issue: Boolean(payload.issueInvoice || payload.paymentAmount || payload.closeWorkOrder),
+      });
+      invoice = upserted.invoice;
+      settlement = upserted.settlement;
 
-        // Ensure payment recorded for closed invoice
-        const paymentAmount = this.decimalFromNumber(financials.amountDue);
-        const paymentMethod = payload.paymentMethod?.toUpperCase() || "CASH";
-        let payment = await this.paymentModel.findOne({ invoiceId: invoice._id });
-        if (payment) {
-          payment.amount = paymentAmount;
-          payment.method = paymentMethod;
-          payment.paidAt = new Date();
-          await payment.save();
-        } else {
-          payment = await this.paymentModel.create({
-            invoiceId: invoice._id,
-            method: paymentMethod,
-            amount: paymentAmount,
-            paidAt: new Date(),
-          });
-        }
-
-        if (wo.status !== WorkOrderStatus.CLOSED) {
-          wo.status = WorkOrderStatus.CLOSED;
-          wo.deliveredAt = new Date();
-          await wo.save();
-          if (performerObjectId) {
-            await this.audit.record({
-              actionType: "WORK_ORDER_BILLING_SUBMIT",
-              entityType: "WorkOrder",
-              entityId: wo._id.toString(),
-              performedByEmployeeId: performerObjectId,
-              after: {
-                status: wo.status,
-                invoiceId: invoice._id.toString(),
-                paymentId: payment._id.toString(),
-              },
-            });
+      if (payload.paymentAmount && payload.paymentAmount > 0) {
+        const paymentResult = await this.createPaymentForInvoice(
+          invoice,
+          wo,
+          {
+            amount: Number(payload.paymentAmount),
+            method: payload.paymentMethod?.toUpperCase() || "CASH",
           }
-        }
+        );
+        paymentRecord = paymentResult.payment;
+        settlement = paymentResult.settlement;
+      }
+
+      if (payload.closeWorkOrder && Number(settlement.outstandingAmount || 0) > 0) {
+        throw new BadRequestException("Full payment is required before closing this work order");
+      }
+
+      if (payload.closeWorkOrder && wo.status !== WorkOrderStatus.CLOSED) {
+        wo.status = WorkOrderStatus.CLOSED;
+        wo.deliveredAt = new Date();
+        await wo.save();
+      }
+
+      if (performerObjectId && (payload.issueInvoice || payload.closeWorkOrder || paymentRecord)) {
+        await this.audit.record({
+          actionType: "WORK_ORDER_BILLING_SUBMIT",
+          entityType: "WorkOrder",
+          entityId: wo._id.toString(),
+          performedByEmployeeId: performerObjectId,
+          after: {
+            status: wo.status,
+            invoiceId: invoice._id.toString(),
+            paymentId: paymentRecord?._id?.toString(),
+            invoiceStatus: invoice.status,
+            totalPaid: settlement.totalPaid,
+            outstandingAmount: settlement.outstandingAmount,
+          },
+        });
       }
     }
 
-    return { workOrder: wo.toJSON(), financials };
+    return {
+      workOrder: wo.toJSON(),
+      financials: {
+        ...financials,
+        totalPaid: settlement.totalPaid,
+        outstandingAmount: settlement.outstandingAmount,
+        overpayment: settlement.overpayment,
+      },
+      invoice: invoice?.toJSON?.() || invoice,
+      payment: paymentRecord?.toJSON?.() || paymentRecord,
+    };
   }
 
   async assign(
@@ -1051,6 +1386,48 @@ export class WorkOrdersService {
         after: { assignedEmployees: employees, status: wo.status },
       });
     }
+    return wo;
+  }
+
+  async issueInvoice(id: string, user: AuthUser) {
+    const wo = await this.workOrderModel.findById(id);
+    if (!wo) throw new NotFoundException("Work order not found");
+    if (wo.status === WorkOrderStatus.CANCELED) {
+      throw new BadRequestException("Cannot issue invoice for canceled work order");
+    }
+    const { invoice, settlement } = await this.upsertInvoiceForWorkOrder(wo, undefined, {
+      issue: true,
+    });
+    const performerId = resolveUserId(user);
+    const performerObjectId = toObjectId(performerId);
+    if (performerObjectId) {
+      await this.audit.record({
+        actionType: "INVOICE_ISSUED",
+        entityType: "Invoice",
+        entityId: invoice!._id.toString(),
+        performedByEmployeeId: performerObjectId,
+        after: {
+          invoiceStatus: invoice!.status,
+          outstandingAmount: settlement.outstandingAmount,
+        },
+      });
+    }
+    return { invoice, settlement };
+  }
+
+  async updateMeta(id: string, payload: { workOrderNumber?: string }, user?: AuthUser) {
+    if (!this.isOwnerAdmin(user)) {
+      throw new ForbiddenException("Only owner admin can edit work order number");
+    }
+    const wo = await this.workOrderModel.findById(id);
+    if (!wo) throw new NotFoundException("Work order not found");
+    if (payload.workOrderNumber !== undefined) {
+      wo.workOrderNumber = await this.generateWorkOrderNumber(
+        payload.workOrderNumber,
+        wo._id.toString()
+      );
+    }
+    await wo.save();
     return wo;
   }
 
@@ -1114,6 +1491,7 @@ export class WorkOrdersService {
         const part = await this.partModel.findOneAndUpdate(
           {
             _id: params.partId,
+            isArchived: { $ne: true },
             $expr: {
               $gte: [
                 {
@@ -1359,45 +1737,34 @@ export class WorkOrdersService {
     const wo = await this.workOrderModel.findById(id);
     if (!wo) throw new NotFoundException("Work order not found");
 
-    // Only allow payment if work order is CLOSED
-    if (wo.status !== WorkOrderStatus.CLOSED) {
-      throw new BadRequestException(
-        `Work order must be CLOSED to take payment. Current status: ${wo.status}`
-      );
-    }
-
-    // Get the invoice for this work order
     const invoice = await this.invoiceModel.findOne({ workOrderId: wo._id });
     if (!invoice) {
       throw new NotFoundException("No invoice found for this work order");
     }
 
-    if (invoice.status === InvoiceStatus.CLOSED) {
-      throw new BadRequestException("Invoice already closed");
+    if (invoice.status === InvoiceStatus.VOID) {
+      throw new BadRequestException("Cannot take payment for void invoice");
     }
 
     const session = await this.connection.startSession();
     session.startTransaction();
     try {
-      // Close the invoice
-      invoice.status = InvoiceStatus.CLOSED;
-      await invoice.save({ session });
+      if (invoice.status === InvoiceStatus.DRAFT) {
+        invoice.status = InvoiceStatus.ISSUED;
+        invoice.issuedAt = invoice.issuedAt || new Date();
+        await invoice.save({ session });
+      }
 
-      // Record the payment
-      const paymentAmount = this.decimalFromNumber(payment.amount);
-      const paymentRecord = await this.paymentModel.create(
-        [
-          {
-            invoiceId: invoice._id,
-            method: payment.method,
-            amount: paymentAmount,
-            paidAt: new Date(),
-          },
-        ],
-        { session }
+      const paymentResult = await this.createPaymentForInvoice(
+        invoice,
+        wo,
+        {
+          amount: Number(payment.amount),
+          method: payment.method,
+        },
+        session
       );
 
-      // Audit the payment
       const performerId = resolveUserId(user);
       const performerObjectId = toObjectId(performerId);
       if (performerObjectId) {
@@ -1407,14 +1774,20 @@ export class WorkOrdersService {
           entityId: wo._id.toString(),
           performedByEmployeeId: performerObjectId,
           after: {
-            payment: paymentRecord[0].toObject(),
-            status: WorkOrderStatus.CLOSED,
+            payment: paymentResult.payment.toObject(),
+            invoiceStatus: invoice.status,
+            outstandingAmount: paymentResult.settlement.outstandingAmount,
           },
         });
       }
 
       await session.commitTransaction();
-      return { workOrder: wo, invoice, payment: paymentRecord[0] };
+      return {
+        workOrder: wo,
+        invoice,
+        payment: paymentResult.payment,
+        settlement: paymentResult.settlement,
+      };
     } catch (err) {
       await session.abortTransaction();
       throw err;

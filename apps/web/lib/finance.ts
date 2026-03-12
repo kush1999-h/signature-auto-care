@@ -21,6 +21,14 @@ const toNumber = (val: unknown) => {
     const num = Number(val);
     return Number.isFinite(num) ? num : 0;
   }
+  if (
+    typeof val === "object" &&
+    val !== null &&
+    "$numberDecimal" in (val as Record<string, unknown>)
+  ) {
+    const num = Number((val as { $numberDecimal?: string }).$numberDecimal || 0);
+    return Number.isFinite(num) ? num : 0;
+  }
   if (typeof val === "object" && "toString" in val) {
     const text = (val as { toString: () => string }).toString();
     const num = Number(text);

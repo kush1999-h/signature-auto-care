@@ -7,10 +7,41 @@ import Shell from "../../components/shell";
 import api from "../../lib/api-client";
 import { useAuth } from "../../lib/auth-context";
 import { useDebounce } from "../../lib/use-debounce";
+import { PageHeader } from "../../components/page-header";
+import { PageToolbar, PageToolbarSection } from "../../components/page-toolbar";
+import { Badge } from "../../components/ui/badge";
+import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
+import { Button } from "../../components/ui/button";
 import { SegmentedControl } from "../../components/ui/segmented-control";
 import { useToast } from "../../components/ui/toast";
 
-type CustomerResult = { _id: string; name: string; phone: string; email?: string; address?: string };
+type CustomerResult = {
+  _id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  address?: string;
+  visitSummary?: {
+    totalVisits?: number;
+    distinctVehicles?: number;
+    lastVisit?: string | null;
+  };
+};
+type VehicleResult = {
+  _id: string;
+  make?: string;
+  model?: string;
+  year?: number;
+  plate?: string;
+  color?: string;
+  vin?: string;
+  visitSummary?: {
+    visitCount?: number;
+    firstVisit?: string | null;
+    lastVisit?: string | null;
+  };
+};
 
 type FormState = {
   customerName: string;
@@ -46,6 +77,9 @@ const initialForm: FormState = {
   oilLevelPct: 50,
 };
 
+const formatDate = (value?: string | null) =>
+  value ? new Date(value).toLocaleDateString() : "--";
+
 const steps = [
   { value: "customer", label: "Customer" },
   { value: "vehicle", label: "Vehicle" },
@@ -73,7 +107,10 @@ export default function IntakePage() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>("");
+  const [vehicleMode, setVehicleMode] = useState<"reuse" | "new">("new");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [showHistorical, setShowHistorical] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const { show: showToast } = useToast();
 
@@ -91,6 +128,15 @@ export default function IntakePage() {
   });
 
   const customerOptions = useMemo(() => searchResults || [], [searchResults]);
+  const customerVehicles = useQuery<VehicleResult[]>({
+    queryKey: ["customerVehicles", selectedCustomerId],
+    queryFn: async () => {
+      if (!selectedCustomerId) return [];
+      const res = await api.get(`/customers/${selectedCustomerId}/vehicles`);
+      return res.data || [];
+    },
+    enabled: Boolean(selectedCustomerId)
+  });
 
   const handleSelectCustomer = (customer: CustomerResult) => {
     setForm((prev) => ({
@@ -101,6 +147,8 @@ export default function IntakePage() {
       address: customer.address || ""
     }));
     setSelectedCustomerId(customer._id);
+    setSelectedVehicleId("");
+    setVehicleMode("reuse");
     setShowSearchResults(false);
     setHighlightedIndex(-1);
     setActiveStep("vehicle");
@@ -119,16 +167,19 @@ export default function IntakePage() {
         customerId = customerRes.data._id;
       }
 
-      const vehicleRes = await api.post("/vehicles", {
-        customerId,
-        make: form.vehicleMake,
-        model: form.vehicleModel,
-        year: form.vehicleYear ? Number(form.vehicleYear) : undefined,
-        color: form.color || undefined,
-        plate: form.plate || undefined,
-        vin: form.vin || undefined,
-      });
-      const vehicleId = vehicleRes.data._id;
+      const vehicleId = selectedVehicleId
+        ? selectedVehicleId
+        : (
+            await api.post("/vehicles", {
+              customerId,
+              make: form.vehicleMake,
+              model: form.vehicleModel,
+              year: form.vehicleYear ? Number(form.vehicleYear) : undefined,
+              color: form.color || undefined,
+              plate: form.plate || undefined,
+              vin: form.vin || undefined,
+            })
+          ).data._id;
 
       const workOrderRes = await api.post("/work-orders", {
         customerId,
@@ -161,6 +212,8 @@ export default function IntakePage() {
       setForm(initialForm);
       setSearchPhone("");
       setSelectedCustomerId(null);
+      setSelectedVehicleId("");
+      setVehicleMode("new");
       setHistoricalMode(false);
       setHistoricalDateIn("");
       setHistoricalDateOut("");
@@ -168,6 +221,7 @@ export default function IntakePage() {
       setHistoricalBillAmount("");
       setHistoricalCostAmount("");
       setHistoricalSource("");
+      setShowHistorical(false);
       setActiveStep("customer");
       showToast({
         title: "Work order created",
@@ -246,28 +300,46 @@ export default function IntakePage() {
 
   return (
     <Shell>
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-foreground">Quick Intake</h1>
-        <p className="text-muted-foreground text-sm">
-          Front desk flow: capture customer + vehicle, and schedule a work order in one step.
-        </p>
-      </div>
+      <PageHeader
+        title="Quick Intake"
+        description="Capture the customer, confirm the vehicle, and schedule the job in one front-desk flow."
+        badge={<Badge variant="secondary">{steps.findIndex((step) => step.value === activeStep) + 1} / 3</Badge>}
+        meta={
+          selectedCustomerId ? (
+            <>
+              <span>Returning customer</span>
+              <span>Vehicle reuse available</span>
+            </>
+          ) : (
+            <span>New or returning customers supported</span>
+          )
+        }
+      />
 
       {!canCreateWO ? (
         <div className="glass p-6 rounded-xl">
           <p className="font-semibold">No access</p>
-          <p className="text-sm text-white/60">Only Service Advisor, Ops Manager, or Admin can create work orders.</p>
+          <p className="text-sm text-muted-foreground">Only Service Advisor, Ops Manager, or Admin can create work orders.</p>
         </div>
       ) : (
         <>
-          <div className="mb-4">
-            <SegmentedControl
-              aria-label="Intake steps"
-              options={steps.map((s) => ({ value: s.value, label: s.label }))}
-              value={activeStep}
-              onChange={(val) => setActiveStep(val as typeof activeStep)}
-            />
-          </div>
+          <PageToolbar>
+            <PageToolbarSection>
+              <SegmentedControl
+                aria-label="Intake steps"
+                options={steps.map((s) => ({ value: s.value, label: s.label }))}
+                value={activeStep}
+                onChange={(val) => setActiveStep(val as typeof activeStep)}
+              />
+            </PageToolbarSection>
+            <PageToolbarSection align="end">
+              <div className="text-xs text-muted-foreground">
+                {selectedCustomerId
+                  ? "Select a saved vehicle or switch to a new one."
+                  : "Search by phone to reuse an existing customer first."}
+              </div>
+            </PageToolbarSection>
+          </PageToolbar>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* Customer */}
@@ -279,7 +351,7 @@ export default function IntakePage() {
 
               {/* Customer Search */}
               <div className="relative">
-                <input
+                <Input
                   ref={searchInputRef}
                   placeholder="Search by phone number..."
                   value={searchPhone}
@@ -304,7 +376,6 @@ export default function IntakePage() {
                       setShowSearchResults(false);
                     }
                   }}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
                 {searchPhone.length >= 3 && showSearchResults && (
                   <div className="absolute top-full left-0 right-0 mt-1 bg-secondary border border-border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto">
@@ -320,6 +391,13 @@ export default function IntakePage() {
                           >
                             <p className="font-semibold text-foreground text-sm">{customer.name}</p>
                             <p className="text-muted-foreground text-xs">{customer.phone}</p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {customer.visitSummary?.totalVisits || 0} visits |{" "}
+                              {customer.visitSummary?.distinctVehicles || 0} vehicles
+                              {customer.visitSummary?.lastVisit
+                                ? ` | Last ${formatDate(customer.visitSummary.lastVisit)}`
+                                : ""}
+                            </p>
                           </button>
                         ))}
                       </div>
@@ -338,48 +416,55 @@ export default function IntakePage() {
               </div>
 
               {selectedCustomerId && (
-                <div className="bg-accent/10 border border-accent rounded-lg p-2 text-sm">
-                  <p className="text-accent">Customer selected</p>
+                <div className="rounded-lg border border-accent/40 bg-accent/10 p-3 text-sm space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-accent">Returning customer selected</p>
+                    <Badge variant="secondary">
+                      {customerOptions.find((item) => item._id === selectedCustomerId)?.visitSummary?.totalVisits || 0} visits
+                    </Badge>
+                  </div>
+                  {customerOptions.find((item) => item._id === selectedCustomerId)?.visitSummary && (
+                    <p className="text-[11px] text-muted-foreground">
+                      {customerOptions.find((item) => item._id === selectedCustomerId)?.visitSummary?.distinctVehicles || 0} vehicles
+                      {" | "}Last visit {formatDate(customerOptions.find((item) => item._id === selectedCustomerId)?.visitSummary?.lastVisit)}
+                    </p>
+                  )}
                 </div>
               )}
 
               <label className="text-sm text-muted-foreground">
-                Full name <span className="text-red-400">*</span>
-                <input
+                Full name <span className="text-[var(--danger-text)]">*</span>
+                <Input
                   placeholder="Full name"
                   value={form.customerName}
                   onChange={(e) => setForm({ ...form, customerName: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.customerName && <span className="text-[11px] text-red-400">{fieldErrors.customerName}</span>}
+                {fieldErrors.customerName && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.customerName}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
-                Phone <span className="text-red-400">*</span>
-                <input
+                Phone <span className="text-[var(--danger-text)]">*</span>
+                <Input
                   placeholder="Phone"
                   value={form.phone}
                   onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.phone && <span className="text-[11px] text-red-400">{fieldErrors.phone}</span>}
+                {fieldErrors.phone && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.phone}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 Email
-                <input
+                <Input
                   placeholder="Email (optional)"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.email && <span className="text-[11px] text-red-400">{fieldErrors.email}</span>}
+                {fieldErrors.email && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.email}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 Address
-                <input
+                <Input
                   placeholder="Address (optional)"
                   value={form.address}
                   onChange={(e) => setForm({ ...form, address: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
               </label>
             </div>
@@ -390,71 +475,183 @@ export default function IntakePage() {
                 <p className="font-semibold text-foreground">Vehicle</p>
                 <span className="text-[11px] text-muted-foreground">Step 2 of 3</span>
               </div>
+              {selectedCustomerId && (customerVehicles.data?.length || 0) > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-foreground">Vehicle mode</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Reuse saved details or enter a different car
+                    </p>
+                  </div>
+                  <SegmentedControl
+                    aria-label="Vehicle entry mode"
+                    options={[
+                      { value: "reuse", label: "Reuse existing" },
+                      { value: "new", label: "Create new" },
+                    ]}
+                    value={vehicleMode}
+                    onChange={(val) => {
+                      const next = val as "reuse" | "new";
+                      setVehicleMode(next);
+                      if (next === "new") {
+                        setSelectedVehicleId("");
+                      }
+                    }}
+                  />
+                </div>
+              )}
               <label className="text-sm text-muted-foreground">
-                Make <span className="text-red-400">*</span>
-                <input
+                Make <span className="text-[var(--danger-text)]">*</span>
+                <Input
                   placeholder="Make (e.g., Toyota)"
                   value={form.vehicleMake}
                   onChange={(e) => setForm({ ...form, vehicleMake: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.vehicleMake && <span className="text-[11px] text-red-400">{fieldErrors.vehicleMake}</span>}
+                {fieldErrors.vehicleMake && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.vehicleMake}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
-                Model <span className="text-red-400">*</span>
-                <input
+                Model <span className="text-[var(--danger-text)]">*</span>
+                <Input
                   placeholder="Model (e.g., Corolla)"
                   value={form.vehicleModel}
                   onChange={(e) => setForm({ ...form, vehicleModel: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.vehicleModel && <span className="text-[11px] text-red-400">{fieldErrors.vehicleModel}</span>}
+                {fieldErrors.vehicleModel && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.vehicleModel}</span>}
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-sm text-muted-foreground">
                   Year
-                  <input
+                  <Input
                     placeholder="Year"
                     value={form.vehicleYear}
                     onChange={(e) => setForm({ ...form, vehicleYear: e.target.value })}
-                    className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                   />
-                  {fieldErrors.vehicleYear && <span className="text-[11px] text-red-400">{fieldErrors.vehicleYear}</span>}
+                  {fieldErrors.vehicleYear && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.vehicleYear}</span>}
                 </label>
                 <label className="text-sm text-muted-foreground">
                   Color
-                  <input
+                  <Input
                     placeholder="Color"
                     value={form.color}
                     onChange={(e) => setForm({ ...form, color: e.target.value })}
-                    className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                   />
                 </label>
               </div>
               <label className="text-sm text-muted-foreground">
-                Plate <span className="text-red-400">*</span>
-                <input
+                Plate <span className="text-[var(--danger-text)]">*</span>
+                <Input
                   placeholder="Plate"
                   value={form.plate}
                   onChange={(e) => setForm({ ...form, plate: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.plate && <span className="text-[11px] text-red-400">{fieldErrors.plate}</span>}
+                {fieldErrors.plate && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.plate}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 VIN
-                <input
+                <Input
                   placeholder="VIN"
                   value={form.vin}
                   onChange={(e) => setForm({ ...form, vin: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
               </label>
+              {selectedCustomerId && vehicleMode === "reuse" && (
+                <div className="rounded-lg border border-border p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-foreground">Existing vehicles</p>
+                    <span className="text-[11px] text-muted-foreground">
+                      {customerVehicles.isLoading ? "Loading..." : `${customerVehicles.data?.length || 0} found`}
+                    </span>
+                  </div>
+                  {customerVehicles.data && customerVehicles.data.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="rounded-md border border-border bg-card/50 px-3 py-2 text-[11px] text-muted-foreground">
+                        Reuse an existing vehicle to auto-fill make, model, year, color, plate, and VIN. Choose
+                        “Create new vehicle” if this customer came with a different car.
+                      </div>
+                      <select
+                        value={selectedVehicleId}
+                        onChange={(e) => {
+                          const vehicleId = e.target.value;
+                          setSelectedVehicleId(vehicleId);
+                          const vehicle = (customerVehicles.data || []).find((item) => item._id === vehicleId);
+                          if (vehicle) {
+                            setForm((prev) => ({
+                              ...prev,
+                              vehicleMake: vehicle.make || prev.vehicleMake,
+                              vehicleModel: vehicle.model || prev.vehicleModel,
+                              vehicleYear: vehicle.year ? String(vehicle.year) : prev.vehicleYear,
+                              color: vehicle.color || prev.color,
+                              plate: vehicle.plate || prev.plate,
+                              vin: vehicle.vin || prev.vin,
+                            }));
+                          }
+                        }}
+                        className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                      >
+                        <option value="">Choose saved vehicle</option>
+                        {(customerVehicles.data || []).map((vehicle) => (
+                          <option key={vehicle._id} value={vehicle._id}>
+                            {vehicle.make || "Vehicle"} {vehicle.model || ""} | {vehicle.plate || "--"} |{" "}
+                            {vehicle.visitSummary?.visitCount || 0} visits
+                          </option>
+                        ))}
+                      </select>
+                      <div className="grid gap-2">
+                        {(customerVehicles.data || []).map((vehicle) => {
+                          const active = selectedVehicleId === vehicle._id;
+                          return (
+                            <button
+                              key={vehicle._id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedVehicleId(vehicle._id);
+                                setForm((prev) => ({
+                                  ...prev,
+                                  vehicleMake: vehicle.make || prev.vehicleMake,
+                                  vehicleModel: vehicle.model || prev.vehicleModel,
+                                  vehicleYear: vehicle.year ? String(vehicle.year) : prev.vehicleYear,
+                                  color: vehicle.color || prev.color,
+                                  plate: vehicle.plate || prev.plate,
+                                  vin: vehicle.vin || prev.vin,
+                                }));
+                              }}
+                              className={`rounded-lg border p-3 text-left transition ${
+                                active
+                                  ? "border-primary bg-primary/10"
+                                  : "border-border bg-card/40 hover:bg-card/70"
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">
+                                    {[vehicle.make, vehicle.model, vehicle.year].filter(Boolean).join(" ") || "Vehicle"}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">
+                                    Plate {vehicle.plate || "--"}{vehicle.color ? ` | ${vehicle.color}` : ""}
+                                  </p>
+                                </div>
+                                <div className="text-right text-[11px] text-muted-foreground">
+                                  <p>{vehicle.visitSummary?.visitCount || 0} visits</p>
+                                  <p>Last {formatDate(vehicle.visitSummary?.lastVisit)}</p>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      No saved vehicles for this customer yet.
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="rounded-lg border border-border bg-card px-3 py-3">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-semibold text-foreground">
-                      Oil level <span className="text-red-400">*</span>
+                      Oil level <span className="text-[var(--danger-text)]">*</span>
                     </p>
                     <p className="text-[11px] text-muted-foreground">Set the current oil level as a percentage.</p>
                   </div>
@@ -491,7 +688,7 @@ export default function IntakePage() {
                   />
                 </div>
                 {fieldErrors.oilLevelPct && (
-                  <span className="text-[11px] text-red-400">{fieldErrors.oilLevelPct}</span>
+                  <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.oilLevelPct}</span>
                 )}
               </div>
             </div>
@@ -503,61 +700,74 @@ export default function IntakePage() {
                 <span className="text-[11px] text-muted-foreground">Step 3 of 3</span>
               </div>
               <label className="text-sm text-muted-foreground">
-                Complaint / notes <span className="text-red-400">*</span>
-                <textarea
+                Complaint / notes <span className="text-[var(--danger-text)]">*</span>
+                <Textarea
                   placeholder="Complaint / notes"
                   value={form.complaint}
                   onChange={(e) => setForm({ ...form, complaint: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full min-h-[120px] text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  className="min-h-[120px]"
                 />
-                {fieldErrors.complaint && <span className="text-[11px] text-red-400">{fieldErrors.complaint}</span>}
+                {fieldErrors.complaint && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.complaint}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 Reference
-                <input
+                <Input
                   placeholder="Reference (optional)"
                   value={form.reference}
                   onChange={(e) => setForm({ ...form, reference: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
-                {fieldErrors.reference && <span className="text-[11px] text-red-400">{fieldErrors.reference}</span>}
+                {fieldErrors.reference && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.reference}</span>}
               </label>
               <label className="text-sm text-muted-foreground">
                 Advance received
-                <input
+                <Input
                   placeholder="Advance amount (optional)"
                   value={form.advanceAmount}
                   onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })}
-                  className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 />
                 <span className="text-[11px] text-muted-foreground">
                   Advance will be adjusted automatically during billing.
                 </span>
-                {fieldErrors.advanceAmount && <span className="text-[11px] text-red-400">{fieldErrors.advanceAmount}</span>}
+                {fieldErrors.advanceAmount && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.advanceAmount}</span>}
               </label>
               {canCreateHistorical && (
                 <div className="rounded-lg border border-border p-3 space-y-2">
-                  <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={historicalMode}
-                      onChange={(e) => setHistoricalMode(e.target.checked)}
-                      className="h-4 w-4 accent-primary"
-                    />
-                    Historical entry (backfill old work order)
-                  </label>
-                  {historicalMode && (
+                  <button
+                    type="button"
+                    onClick={() => setShowHistorical((open) => !open)}
+                    className="w-full text-left"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-foreground">Historical entry</p>
+                      <span className="text-[11px] text-muted-foreground">{showHistorical ? "Hide" : "Show"}</span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Use only for backfilling older paper or legacy work orders.
+                    </p>
+                  </button>
+                  {showHistorical && (
                     <div className="space-y-2">
+                      <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={historicalMode}
+                          onChange={(e) => setHistoricalMode(e.target.checked)}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        Enable historical mode
+                      </label>
+                      {historicalMode && (
+                        <>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <label className="text-sm text-muted-foreground">
-                          Date in <span className="text-red-400">*</span>
+                          Date in <span className="text-[var(--danger-text)]">*</span>
                           <input
                             type="date"
                             value={historicalDateIn}
                             onChange={(e) => setHistoricalDateIn(e.target.value)}
                             className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                           />
-                          {fieldErrors.historicalDateIn && <span className="text-[11px] text-red-400">{fieldErrors.historicalDateIn}</span>}
+                          {fieldErrors.historicalDateIn && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.historicalDateIn}</span>}
                         </label>
                         <label className="text-sm text-muted-foreground">
                           Date out
@@ -567,7 +777,7 @@ export default function IntakePage() {
                             onChange={(e) => setHistoricalDateOut(e.target.value)}
                             className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                           />
-                          {fieldErrors.historicalDateOut && <span className="text-[11px] text-red-400">{fieldErrors.historicalDateOut}</span>}
+                          {fieldErrors.historicalDateOut && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.historicalDateOut}</span>}
                         </label>
                       </div>
                       <label className="text-sm text-muted-foreground">
@@ -592,7 +802,7 @@ export default function IntakePage() {
                             placeholder="Optional"
                             className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                           />
-                          {fieldErrors.historicalBillAmount && <span className="text-[11px] text-red-400">{fieldErrors.historicalBillAmount}</span>}
+                          {fieldErrors.historicalBillAmount && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.historicalBillAmount}</span>}
                         </label>
                         <label className="text-sm text-muted-foreground">
                           Legacy cost (optional)
@@ -602,7 +812,7 @@ export default function IntakePage() {
                             placeholder="Optional"
                             className="bg-muted border border-border rounded-lg px-3 py-2 w-full text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                           />
-                          {fieldErrors.historicalCostAmount && <span className="text-[11px] text-red-400">{fieldErrors.historicalCostAmount}</span>}
+                          {fieldErrors.historicalCostAmount && <span className="text-[11px] text-[var(--danger-text)]">{fieldErrors.historicalCostAmount}</span>}
                         </label>
                       </div>
                       <label className="text-sm text-muted-foreground">
@@ -617,20 +827,22 @@ export default function IntakePage() {
                       <p className="text-[11px] text-muted-foreground">
                         If bill and cost are provided, finance reports will include this backfilled job.
                       </p>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
               )}
-              <button
+              <Button
                 onClick={onSubmit}
                 disabled={intake.isPending}
-                className="w-full py-2 rounded-lg bg-primary font-semibold text-foreground disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                className="w-full"
               >
                 {intake.isPending ? "Saving..." : "Create & Schedule"}
-              </button>
+              </Button>
               {intake.isSuccess && <p className="text-accent text-sm">Intake saved and work order scheduled.</p>}
               {intake.isError && (
-                <p className="text-sm text-red-400">{(intake.error as Error)?.message || "Failed to save intake."}</p>
+                <p className="text-sm text-[var(--danger-text)]">{(intake.error as Error)?.message || "Failed to save intake."}</p>
               )}
             </div>
           </div>

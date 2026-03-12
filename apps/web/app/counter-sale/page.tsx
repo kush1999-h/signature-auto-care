@@ -470,7 +470,7 @@ export default function CounterSalePage() {
                 aria-label="Scan or search input"
                 className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
               />
-              {addError && <p className="text-xs text-red-400 mt-1">{addError}</p>}
+              {addError && <p className="mt-1 text-xs text-[var(--danger-text)]">{addError}</p>}
               {showPartResults && (
                 <div className="mt-2 rounded-lg border border-border bg-card/95 shadow-lg">
                   {partsQuery.isFetching && (
@@ -699,7 +699,7 @@ export default function CounterSalePage() {
             aria-label="Payment amount"
           />
           <p className="text-xs text-muted-foreground">Payment must cover total.</p>
-          {paymentError && <p className="text-xs text-red-400">{paymentError}</p>}
+          {paymentError && <p className="text-xs text-[var(--danger-text)]">{paymentError}</p>}
 
           <div className="border-t border-border pt-3 space-y-1 text-sm">
             <div className="flex items-center justify-between">

@@ -50,6 +50,21 @@ export class Invoice {
 
   @Prop({ enum: Object.values(InvoiceStatus), default: InvoiceStatus.DRAFT })
   status!: string;
+
+  @Prop({ default: 0, type: MongooseSchema.Types.Decimal128 })
+  totalPaid!: Types.Decimal128;
+
+  @Prop({ default: 0, type: MongooseSchema.Types.Decimal128 })
+  outstandingAmount!: Types.Decimal128;
+
+  @Prop()
+  issuedAt?: Date;
+
+  @Prop()
+  dueDate?: Date;
+
+  @Prop()
+  voidedAt?: Date;
 }
 
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);
@@ -69,6 +84,8 @@ InvoiceSchema.set("toJSON", {
     ret.subtotal = toNumber(ret.subtotal);
     ret.tax = toNumber(ret.tax);
     ret.total = toNumber(ret.total);
+    ret.totalPaid = toNumber(ret.totalPaid);
+    ret.outstandingAmount = toNumber(ret.outstandingAmount);
     if (Array.isArray(ret.lineItems)) {
       ret.lineItems = ret.lineItems.map((li: unknown) => {
         const item = li as { unitPrice?: unknown; total?: unknown; costAtTime?: unknown };

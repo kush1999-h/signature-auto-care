@@ -57,19 +57,18 @@ export class PartsService {
     return next;
   }
 
-  async list(query: { search?: string; page?: number; limit?: number } = {}) {
-    const { search = "", page = 1, limit = 200 } = query;
+  async list(query: { search?: string; page?: number; limit?: number; includeArchived?: boolean } = {}) {
+    const { search = "", page = 1, limit = 200, includeArchived = false } = query;
     const safeLimit = Math.min(Math.max(Number(limit) || 0, 1), 500);
     const pageNum = Math.max(Number(page) || 1, 1);
-    const filter = search
-      ? {
-          $or: [
-            { partName: { $regex: search, $options: "i" } },
-            { sku: { $regex: search, $options: "i" } },
-            { barcode: { $regex: search, $options: "i" } }
-          ]
-        }
-      : {};
+    const filter: Record<string, unknown> = includeArchived ? {} : { isArchived: { $ne: true } };
+    if (search) {
+      filter.$or = [
+        { partName: { $regex: search, $options: "i" } },
+        { sku: { $regex: search, $options: "i" } },
+        { barcode: { $regex: search, $options: "i" } }
+      ];
+    }
     const items = await this.partModel
       .find(filter)
       .skip((pageNum - 1) * safeLimit)
@@ -115,6 +114,39 @@ export class PartsService {
         performedByRole: data.performedByRole,
         before: before?.toObject(),
         after: part.toObject()
+      });
+    }
+    return part;
+  }
+
+  async setArchived(
+    id: string,
+    archived: boolean,
+    meta: PartAuditMeta = {}
+  ) {
+    const part = await this.partModel.findById(id);
+    if (!part) throw new NotFoundException("Part not found");
+    if (archived && ((part.onHandQty || 0) > 0 || (part.reservedQty || 0) > 0)) {
+      throw new BadRequestException("Adjust stock and reservations to zero before archiving");
+    }
+    part.isArchived = archived;
+    part.archivedAt = archived ? new Date() : undefined;
+    part.archivedBy = archived && meta.performedByEmployeeId
+      ? new Types.ObjectId(String(meta.performedByEmployeeId))
+      : undefined;
+    await part.save();
+    if (meta.performedByEmployeeId) {
+      await this.audit.record({
+        actionType: archived ? "PART_ARCHIVED" : "PART_UNARCHIVED",
+        entityType: "Part",
+        entityId: part._id.toString(),
+        performedByEmployeeId: new Types.ObjectId(String(meta.performedByEmployeeId)),
+        performedByName: meta.performedByName,
+        performedByRole: meta.performedByRole,
+        after: {
+          isArchived: part.isArchived,
+          archivedAt: part.archivedAt,
+        }
       });
     }
     return part;
